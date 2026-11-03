@@ -166,6 +166,12 @@ assert before <= 2 and more >= 6 and fewer <= 3, (before, more, fewer)
 wait(lv, {Status.COMPLETED, Status.ERROR}, 90); assert lv.status == Status.COMPLETED, lv.error
 check(lv); print("OK live connection change")
 
+# "Download later" parks it: paused, and the queue doesn't start it again by itself
+lt = m2.add(base + "/crawl-later", connections=2)
+wait(lt, {Status.DOWNLOADING}); m2.later(lt.id); wait(lt, {Status.PAUSED}); time.sleep(1.5)
+assert lt.status == Status.PAUSED, lt.status
+m2.remove(lt.id, delete_file=True); print("OK download later")
+
 # 9. logins: Basic, Digest, user:pass@ in the address
 from ydm.engine.item import LOGIN_NEEDED, EXPIRED
 from ydm.engine import auth

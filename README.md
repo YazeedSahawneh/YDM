@@ -11,6 +11,8 @@ A personal IDM-style download manager for Windows, written from scratch in Pytho
 - **Change the connection count while a download runs**: new connections join at once, extra ones finish their piece and leave
 - **Pause / resume** that survives restarts, crashes (a crashed download picks up by itself when YDM starts) and app updates; network errors retry by themselves
 - **Renew expired downloads**: when a link stops working, right-click → *Renew download address*, then click the link in the browser again. YDM catches the fresh link, checks it is the same file (same size), and continues where it stopped
+- **Download window** per download: starts before you confirm; Save as (name and folder, any time, even after it finished), Remember this folder, Cancel, Download later, Open with…, the address with a copy button, and the live connection count
+- **Light and dark mode** (or match Windows), plus theme colours, in Options → Appearance
 - **HUD progress bar** that lights each slice of the file as it arrives, marks every working connection, and shifts colour with the percentage (red → amber → yellow → green); **theme colours** in Options → Appearance
 - **Video grabber** (yt-dlp: YouTube and 1,800+ sites) with a quality list showing sizes. YouTube's video and audio streams are downloaded with YDM's own multi-connection engine at the same time and merged with FFmpeg
 - **Video tools on demand**: YDM downloads FFmpeg and Deno itself (one click, ~250 MB once) and keeps yt-dlp current between releases
@@ -47,10 +49,12 @@ Double-click **`build.bat`** → `dist\YDM\YDM.exe` plus the installer `dist\YDM
 
 **In-app updates (one-time setup):** create a public GitHub repo, then set `UPDATE_REPO = "your-name/YDM"` in `ydm/config.py`.
 
-**Each release:**
-1. Raise `APP_VERSION` in `ydm/config.py` (e.g. `1.1.0` → `1.2.0`)
-2. Run `build.bat`
-3. On GitHub, create a release with tag `v1.2.0` and attach `dist\YDM-Setup-1.2.0.exe`
+**Each release** (GitHub builds the installer: `.github/workflows/release.yml`):
+1. Raise `APP_VERSION` in `ydm/config.py` (e.g. `1.4.0` → `1.5.0`) and commit
+2. Tag and push: `git tag -a v1.5.0 -m "What's new…"` then `git push origin main v1.5.0`
+3. GitHub Actions builds `YDM-Setup-1.5.0.exe` on Windows (about 10 minutes) and attaches it to the release, with the tag message as the notes
+
+To attach a missing installer to an existing tag: Actions → Release → Run workflow → enter the tag. `build.bat` still builds locally for testing.
 
 Installed copies check once a day, download the setup in the background and offer **Restart to update**. The installer runs silently and starts YDM again. Nobody reinstalls by hand.
 

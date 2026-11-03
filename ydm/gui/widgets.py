@@ -98,8 +98,8 @@ class DetailsPane(QFrame):
         self.name.setObjectName("title")
         self.name.setTextInteractionFlags(Qt.TextSelectableByMouse)
         self.status = QLabel("")
-        self.btn_open = QPushButton(icons.icon("open"), " Open")
-        self.btn_folder = QPushButton(icons.icon("folder"), " Show in folder")
+        self.btn_open = icons.put(QPushButton(" Open"), "open")
+        self.btn_folder = icons.put(QPushButton(" Show in folder"), "folder")
         for b in (self.btn_open, self.btn_folder):
             b.setObjectName("flat")
             b.setCursor(Qt.PointingHandCursor)

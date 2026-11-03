@@ -87,6 +87,15 @@ def open_path(path: str) -> None:
         subprocess.Popen(["xdg-open", path])
 
 
+def open_with(path: str) -> None:
+    """Windows' "Open with" chooser for a file; elsewhere, the default handler."""
+    if os.name == "nt":
+        import subprocess
+        subprocess.Popen(["rundll32.exe", "shell32.dll,OpenAs_RunDLL", os.path.normpath(path)])
+    else:
+        open_path(path)
+
+
 def reveal_in_folder(path: str) -> None:
     if os.name == "nt" and os.path.exists(path):
         import subprocess

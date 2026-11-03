@@ -55,8 +55,10 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
+    theme.set_mode(settings.ui_mode)
     theme.set_colors(settings.accent, settings.signal)
     hudbar.BAR_MODE[0] = settings.bar_colors
+    app.setPalette(theme.palette())
     app.setStyleSheet(theme.QSS)
     app.setWindowIcon(theme.app_icon())
     app.setQuitOnLastWindowClosed(False)       # keep running in the tray

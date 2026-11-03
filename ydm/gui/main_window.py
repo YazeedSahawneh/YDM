@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
     def _act(self, text, slot, icon=None, shortcut=None, tip=None) -> QAction:
         a = QAction(text, self)
         if icon:
-            a.setIcon(icons.icon(icon, theme.ACCENT if icon == "add" else theme.TEXT, 24))
+            icons.put(a, icon, "accent_ink" if icon == "add" else "text", 24)
         if shortcut:
             a.setShortcut(QKeySequence(shortcut))
         if tip:
@@ -145,13 +145,14 @@ class MainWindow(QMainWindow):
 
         tl = mb.addMenu("T&ools")
         tl.addAction(self.a_options)
-        tl.addAction(icons.icon("tools"), "Install video tools", lambda: self.install_video_tools(force=True))
-        tl.addAction(icons.icon("refresh"), "Update yt-dlp", lambda: self.update_ytdlp(manual=True))
-        tl.addAction(icons.icon("folder"), "Open download folder",
-                     lambda: os.makedirs(self.settings.download_dir, exist_ok=True) or open_path(self.settings.download_dir))
+        icons.put(tl.addAction("Install video tools", lambda: self.install_video_tools(force=True)), "tools")
+        icons.put(tl.addAction("Update yt-dlp", lambda: self.update_ytdlp(manual=True)), "refresh")
+        icons.put(tl.addAction("Open download folder", lambda: os.makedirs(self.settings.download_dir, exist_ok=True)
+                               or open_path(self.settings.download_dir)), "folder")
 
         hp = mb.addMenu("&Help")
-        hp.addAction(icons.icon("update"), "Check for updates", lambda: self.check_for_updates(manual=True))
+        self.a_update = icons.put(hp.addAction("Check for updates…", lambda: self.check_for_updates(manual=True)),
+                                  "update")
         hp.addAction("Browser extension…", lambda: self.open_settings(3))
         hp.addSeparator()
         hp.addAction(f"About {APP_NAME}", self._about)
@@ -197,7 +198,8 @@ class MainWindow(QMainWindow):
         def node(name, parent=None, icon=None):
             it = QTreeWidgetItem([name, ""])
             it.setData(0, Qt.UserRole, name)
-            it.setIcon(0, icons.icon(icon or SIDEBAR_ICONS.get(name, "other"), theme.MUTED, 16))
+            it.setData(0, Qt.UserRole + 1, icon or SIDEBAR_ICONS.get(name, "other"))
+            it.setIcon(0, icons.icon(icon or SIDEBAR_ICONS.get(name, "other"), "muted", 16))
             it.setTextAlignment(1, Qt.AlignRight | Qt.AlignVCenter)
             it.setForeground(1, theme.ink("Queued"))
             it.setFont(1, theme.number_font(8.5))
@@ -302,10 +304,11 @@ class MainWindow(QMainWindow):
         self.tray = QSystemTrayIcon(theme.app_icon(), self)
         self.tray.setToolTip(APP_NAME)
         menu = QMenu()
-        menu.addAction(icons.icon("all"), "Show YDM", self.show_normal)
+        icons.put(menu.addAction("Show YDM", self.show_normal), "all")
         menu.addAction(self.a_add)
         menu.addAction(self.a_video)
         menu.addAction(self.a_stop_all)
+        icons.put(menu.addAction("Check for updates…", lambda: self.check_for_updates(manual=True)), "update")
         menu.addSeparator()
         menu.addAction("Exit", self.quit)
         self._tray_menu = menu
@@ -574,24 +577,31 @@ class MainWindow(QMainWindow):
             s = dlg.updated_settings()
             s.save()
             self.manager.apply_settings(s)
-            self.apply_theme(s.accent, s.signal, s.bar_colors)
+            self.apply_theme(s.accent, s.signal, s.bar_colors, s.ui_mode)
             if s.port != old_port:
                 QMessageBox.information(self, APP_NAME, "Restart YDM to use the new extension port.")
             self.refresh()
 
-    def apply_theme(self, accent: str, signal: str, bar_mode: str):
-        """Recolour the whole app in place (Options → Appearance)."""
+    def apply_theme(self, accent: str, signal: str, bar_mode: str, ui_mode: str = "dark"):
+        """Recolour the whole app in place (Options → Appearance): light/dark, accent, meters."""
+        theme.set_mode(ui_mode)
         theme.set_colors(accent, signal)
         hudbar.BAR_MODE[0] = bar_mode
-        QApplication.instance().setStyleSheet(theme.QSS)
-        self.a_add.setIcon(icons.icon("add", theme.ACCENT, 24))
+        app = QApplication.instance()
+        app.setPalette(theme.palette())
+        app.setStyleSheet(theme.QSS)
+        icons.retint([self, self._tray_menu])
+        for it in self._tree_items.values():
+            it.setIcon(0, icons.icon(it.data(0, Qt.UserRole + 1), "muted", 16))
+            it.setForeground(1, theme.ink("Queued"))
         self.setWindowIcon(theme.app_icon())
         self.tray.setIcon(theme.app_icon())
+        theme.apply_window_chrome(self)
         for w in list(self._windows):
             w.apply_theme()
         self.table.viewport().update()
         self.speed_meter.update()
-        self.details.update()
+        self.details.show_item(self.details.item)
 
     def refresh_address(self, item_id: str):
         item = self.manager.get(item_id)
@@ -773,7 +783,7 @@ class MainWindow(QMainWindow):
 
         def work():
             rel = updater.check()
-            if rel and updater.can_install():
+            if rel and rel.url and updater.can_install():
                 self.bg_progress.emit("update", 0.0)
                 path = updater.download(rel, lambda d, t: self.bg_progress.emit("update", d / t if t > 0 else -1))
                 return rel, path
@@ -812,6 +822,13 @@ class MainWindow(QMainWindow):
                                          f"downloads carry on.", "update",
                                          [("Later", self.banner.hide, False),
                                           ("Restart to update", self.restart_to_update, True)])
+            elif not rel.url:
+                if self._manual_update:
+                    self.banner.show_message(f"YDM {rel.version} is published, but its installer isn't attached to "
+                                             "the release yet (it's still building, or the upload was missed).",
+                                             "update", [("OK", self.banner.hide, False),
+                                                        ("Open release page", lambda: webbrowser.open(
+                                                            f"https://github.com/{UPDATE_REPO}/releases"), True)])
             else:
                 self.banner.show_message(f"YDM {rel.version} is available.", "update",
                                          [("Later", self.banner.hide, False),

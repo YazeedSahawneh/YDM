@@ -135,6 +135,27 @@ class DownloadManager:
         elif item.status not in Status.ACTIVE and item.status != Status.COMPLETED:
             self.start(item_id)
 
+    def rename(self, item_id: str, filename: str = "", save_dir: str = "") -> None:
+        """Save as: a new name and/or folder. Finished files move now; running ones when they finish."""
+        item = self._items.get(item_id)
+        if not item:
+            return
+        if filename and filename != item.filename:
+            item.dest_name = filename
+        if save_dir and os.path.normcase(os.path.abspath(save_dir)) != os.path.normcase(os.path.abspath(item.save_dir or ".")):
+            item.dest_dir = save_dir
+        if item.status == Status.COMPLETED and (item.dest_name or item.dest_dir):
+            self._move_finished(item)
+        self._dirty = True
+
+    def later(self, item_id: str) -> None:
+        """Download later: stop now, keep it in the list (Resume or Start queue continues it)."""
+        item = self._items.get(item_id)
+        if item:
+            item.pending = False
+            self._dirty = True
+            threading.Thread(target=self._park, args=(item_id,), daemon=True).start()
+
     def discard(self, item_id: str) -> None:
         """Cancel a pre-started download: stop it and delete what it fetched (non-blocking)."""
         threading.Thread(target=self.remove, args=(item_id,), kwargs={"delete_file": True}, daemon=True).start()
@@ -157,7 +178,10 @@ class DownloadManager:
     def _park(self, item_id: str) -> None:
         self.pause(item_id)
         self._wait_stopped(item_id)
-        self.queue(item_id)
+        item = self._items.get(item_id)
+        if item and item.status not in (Status.COMPLETED, Status.ERROR):
+            item.status = Status.PAUSED        # a queued item would start again at once
+            self._dirty = True
 
     def set_connections(self, item_id: str, n: int) -> None:
         """Change a download's connection count; a running one adjusts on the fly."""
@@ -311,6 +335,8 @@ class DownloadManager:
         net.configure_proxy(s.proxy_mode, s.proxy_host, s.proxy_port, s.proxy_user, vault.reveal(s.proxy_pass))
 
     def resolve_dir(self, item: DownloadItem) -> str:
+        if self.settings.remember_dir:
+            return self.settings.remember_dir
         base = Path(self.settings.download_dir)
         if self.settings.use_category_folders:
             base = base / (item.category or "Other")
@@ -348,6 +374,8 @@ class DownloadManager:
         if item.status == Status.COMPLETED:
             item.seen = False
             item.retries = 0
+            if item.dest_name or item.dest_dir:       # "Save as" while a video was still downloading
+                self._move_finished(item)
             if item.pending:
                 self.save()
                 return                        # finished before the user confirmed; the window reports it

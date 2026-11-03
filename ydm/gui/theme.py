@@ -3,10 +3,13 @@
 Graphite anodised ground, warm-white silk-screen labels, tabular numbers.
 Signal teal lights the meters (bytes arriving). Amber is reserved for things
 you can press. Every status owns one ink and keeps it everywhere.
-Branding colours live in config.py (ACCENT, SIGNAL).
+Branding colours live in config.py (ACCENT, SIGNAL); the user can change them and
+switch between the dark panel and a light one (set_mode / set_colors). Code reads
+the tokens from this module at paint time, so a switch reaches everything.
 """
 from __future__ import annotations
 
+import math
 import sys
 
 from PySide6.QtCore import QRectF, Qt
@@ -26,30 +29,93 @@ PRESETS = {
     "Silver": ("#D9D4CA", "#9FD8E6"),
 }
 
-BG = "#121417"          # graphite ground (lists, dialogs)
-PANEL = "#191C20"       # brushed panel (toolbar, sidebar, details)
-RAISED = "#22262B"      # inputs, hover
-LINE = "#2C3137"        # hairlines
-TEXT = "#ECE8E1"        # warm white silk-screen
-MUTED = "#969BA2"
-FAINT = "#5E646C"
-UNLIT = "#262B31"       # meter block with nothing in it
-SELECT = "#2B2721"      # selected row: accent-tinted graphite (recomputed by set_colors)
+# Two grounds. Dark: graphite anodised panel. Light: warm paper-white panel, same layout.
+MODES = {
+    "dark": {
+        "BG": "#121417",        # graphite ground (lists, dialogs)
+        "PANEL": "#191C20",     # brushed panel (toolbar, sidebar, details)
+        "RAISED": "#22262B",    # inputs, hover
+        "LINE": "#2C3137",      # hairlines
+        "TEXT": "#ECE8E1",      # warm white silk-screen
+        "MUTED": "#969BA2",
+        "FAINT": "#5E646C",
+        "UNLIT": "#262B31",     # meter cell with nothing in it
+        "ROW_LINE": "#191C20",
+        "EDGE": "#3A4048",      # hover border, checkbox frame
+        "HOVER": "#272C32",
+        "SCROLL": "#343A42",
+        "SCROLL_HOVER": "#454C55",
+        "BANNER": "#1E2226",
+        "SELECT_BASE": "#1F2226",
+        "INK": {"Processing": "#B49CFF", "Paused": "#9AA7B8", "Queued": "#7A828C",
+                "Completed": "#A6E35A", "Error": "#FF6B5E"},
+    },
+    "light": {
+        "BG": "#F6F4F0",
+        "PANEL": "#ECE9E3",
+        "RAISED": "#FFFFFF",
+        "LINE": "#D7D2C9",
+        "TEXT": "#1D1F22",
+        "MUTED": "#5F656D",
+        "FAINT": "#9AA0A7",
+        "UNLIT": "#DFDAD2",
+        "ROW_LINE": "#EAE6DF",
+        "EDGE": "#BDB7AE",
+        "HOVER": "#FBFAF7",
+        "SCROLL": "#C9C3BA",
+        "SCROLL_HOVER": "#B0A99F",
+        "BANNER": "#EFE8DA",
+        "SELECT_BASE": "#F1EEE8",
+        "INK": {"Processing": "#6A4FD8", "Paused": "#5E6B7C", "Queued": "#6B737D",
+                "Completed": "#3F8A12", "Error": "#D2382C"},
+    },
+}
+MODE = "dark"
+
+BG = PANEL = RAISED = LINE = TEXT = MUTED = FAINT = UNLIT = ""
+ROW_LINE = EDGE = HOVER = SCROLL = SCROLL_HOVER = BANNER = SELECT_BASE = ""
+SELECT = "#2B2721"      # selected row: accent-tinted ground (recomputed by set_colors)
 ON_ACCENT = "#1A1408"   # text on the accent
+ACCENT_INK = ACCENT     # the accent used as text/lines on the ground (darker in light mode)
 ACCENT_HOVER = "#FFC266"
 ACCENT_DOWN = "#E9A030"
 
 # Fixed state inks (list, sidebar, details pane, tray all use these)
-INK = {
-    "Downloading": SIGNAL,
-    "Connecting": "#2E9C8A",
-    "Processing": "#B49CFF",
-    "Paused": "#9AA7B8",
-    "Queued": "#7A828C",
-    "Completed": "#A6E35A",
-    "Error": "#FF6B5E",
-}
+INK: dict[str, str] = {"Downloading": SIGNAL, "Connecting": "#2E9C8A"}
 STATUS_COLORS = INK      # older name
+
+
+def system_mode() -> str:
+    """Windows' app mode (Settings → Personalisation → Colours)."""
+    if sys.platform == "win32":
+        try:
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER,
+                                r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize") as k:
+                return "light" if winreg.QueryValueEx(k, "AppsUseLightTheme")[0] else "dark"
+        except OSError:
+            pass
+    return "dark"
+
+
+def set_mode(mode: str) -> None:
+    """"dark", "light" or "system". Call set_colors() afterwards (it rebuilds the QSS)."""
+    global MODE, BG, PANEL, RAISED, LINE, TEXT, MUTED, FAINT, UNLIT
+    global ROW_LINE, EDGE, HOVER, SCROLL, SCROLL_HOVER, BANNER, SELECT_BASE
+    MODE = system_mode() if mode == "system" else ("light" if mode == "light" else "dark")
+    t = MODES[MODE]
+    BG, PANEL, RAISED, LINE, TEXT = t["BG"], t["PANEL"], t["RAISED"], t["LINE"], t["TEXT"]
+    MUTED, FAINT, UNLIT = t["MUTED"], t["FAINT"], t["UNLIT"]
+    ROW_LINE, EDGE, HOVER, SCROLL = t["ROW_LINE"], t["EDGE"], t["HOVER"], t["SCROLL"]
+    SCROLL_HOVER, BANNER, SELECT_BASE = t["SCROLL_HOVER"], t["BANNER"], t["SELECT_BASE"]
+    INK.update(t["INK"])
+
+
+def is_light() -> bool:
+    return MODE == "light"
+
+
+set_mode("dark")
 
 FONT_FAMILY = "Segoe UI"
 
@@ -79,20 +145,51 @@ def _mix(a: str, b: str, t: float) -> str:
                   round(ca.blue() + (cb.blue() - ca.blue()) * t)).name()
 
 
+def _readable_on(ground: str, color: str, minimum: float = 3.0) -> str:
+    """Darken (or lighten) `color` until it reads on `ground` (WCAG contrast >= minimum)."""
+    def lum(c: QColor) -> float:
+        def ch(v):
+            v /= 255
+            return v / 12.92 if v <= 0.03928 else ((v + 0.055) / 1.055) ** 2.4
+        return 0.2126 * ch(c.red()) + 0.7152 * ch(c.green()) + 0.0722 * ch(c.blue())
+    g, c = QColor(ground), QColor(color)
+    for _ in range(20):
+        a, b = sorted((lum(g), lum(c)), reverse=True)
+        if (a + 0.05) / (b + 0.05) >= minimum:
+            break
+        c = c.darker(112) if lum(g) > 0.5 else c.lighter(112)
+    return c.name().upper()
+
+
 def set_colors(accent: str, signal: str) -> None:
     """Switch the theme colours; call before (re)applying build_qss()."""
-    global ACCENT, SIGNAL, SELECT, ON_ACCENT, ACCENT_HOVER, ACCENT_DOWN, QSS
+    global ACCENT, SIGNAL, SELECT, ON_ACCENT, ACCENT_INK, ACCENT_HOVER, ACCENT_DOWN, QSS
     if not QColor(accent).isValid() or not QColor(signal).isValid():
         return
     ACCENT, SIGNAL = QColor(accent).name().upper(), QColor(signal).name().upper()
-    SELECT = _mix("#1F2226", ACCENT, 0.075)
+    SELECT = _mix(SELECT_BASE, ACCENT, 0.075 if MODE == "dark" else 0.16)
     light = QColor(ACCENT).lightnessF() > 0.55
     ON_ACCENT = _mix("#0E0F11", ACCENT, 0.12) if light else "#FFFFFF"
+    ACCENT_INK = _readable_on(BG, ACCENT)
     ACCENT_HOVER = QColor(ACCENT).lighter(112).name()
     ACCENT_DOWN = QColor(ACCENT).darker(112).name()
-    INK["Downloading"] = SIGNAL
-    INK["Connecting"] = QColor(SIGNAL).darker(140).name()
+    INK["Downloading"] = _readable_on(BG, SIGNAL)
+    INK["Connecting"] = QColor(INK["Downloading"]).darker(130).name() if MODE == "dark" \
+        else QColor(INK["Downloading"]).lighter(118).name()
     QSS = build_qss()
+
+
+def palette():
+    """Qt palette matching the tokens, for widgets the style sheet doesn't reach (colour picker, message boxes)."""
+    from PySide6.QtGui import QPalette
+    pal = QPalette()
+    for role, value in ((QPalette.Window, PANEL), (QPalette.WindowText, TEXT), (QPalette.Base, RAISED),
+                        (QPalette.AlternateBase, BG), (QPalette.Text, TEXT), (QPalette.Button, RAISED),
+                        (QPalette.ButtonText, TEXT), (QPalette.Highlight, ACCENT),
+                        (QPalette.HighlightedText, ON_ACCENT), (QPalette.ToolTipBase, RAISED),
+                        (QPalette.ToolTipText, TEXT), (QPalette.PlaceholderText, FAINT), (QPalette.Mid, LINE)):
+        pal.setColor(role, QColor(value))
+    return pal
 
 
 def progress_color(fraction: float, status: str = "Downloading", mode: str = "shift") -> QColor:
@@ -105,9 +202,12 @@ def progress_color(fraction: float, status: str = "Downloading", mode: str = "sh
         return QColor(INK["Completed"])
     if mode == "shift":
         f = max(0.0, min(1.0, fraction))
-        c = QColor.fromHsvF((4 + 104 * f) / 360, 0.74 - 0.08 * f, 1.0)
+        if MODE == "light":                       # deeper inks so yellow still reads on paper
+            c = QColor.fromHsvF((4 + 104 * f) / 360, 0.86, 0.86 - 0.12 * math.sin(math.pi * f))
+        else:
+            c = QColor.fromHsvF((4 + 104 * f) / 360, 0.74 - 0.08 * f, 1.0)
     else:
-        c = QColor(SIGNAL)
+        c = QColor(INK["Downloading"])
     if status in ("Paused", "Queued"):
         c = QColor.fromHsvF(c.hsvHueF() if c.hsvHueF() >= 0 else 0, c.hsvSaturationF() * 0.35,
                             c.valueF() * 0.72)
@@ -140,7 +240,7 @@ QToolBar QToolButton {{ background: transparent; border: 1px solid transparent; 
 QToolBar QToolButton:hover {{ background: {RAISED}; border-color: {LINE}; }}
 QToolBar QToolButton:pressed {{ background: {LINE}; }}
 QToolBar QToolButton:disabled {{ color: {FAINT}; }}
-QToolBar QToolButton#primary {{ color: {ACCENT}; font-weight: 600; }}
+QToolBar QToolButton#primary {{ color: {ACCENT_INK}; font-weight: 600; }}
 
 QTreeWidget#sidebar {{ background: {PANEL}; border: none; border-right: 1px solid {LINE};
                        padding: 8px 6px; outline: 0; }}
@@ -151,7 +251,7 @@ QTreeWidget#sidebar::branch {{ background: transparent; }}
 
 QTableView {{ background: {BG}; border: none; gridline-color: transparent; outline: 0;
               selection-background-color: {SELECT}; selection-color: {TEXT}; }}
-QTableView::item {{ padding: 0 8px; border-bottom: 1px solid #191C20; }}
+QTableView::item {{ padding: 0 8px; border-bottom: 1px solid {ROW_LINE}; }}
 QTableView::item:selected {{ background: {SELECT}; }}
 QHeaderView {{ background: {BG}; }}
 QHeaderView::section {{ background: {BG}; color: {MUTED}; border: none; border-bottom: 1px solid {LINE};
@@ -174,21 +274,21 @@ QComboBox QAbstractItemView {{ background: {PANEL}; border: 1px solid {LINE}; ou
 QSpinBox::up-button, QSpinBox::down-button, QTimeEdit::up-button, QTimeEdit::down-button {{ width: 16px; border: none; }}
 
 QPushButton {{ background: {RAISED}; border: 1px solid {LINE}; border-radius: 6px; padding: 7px 16px; }}
-QPushButton:hover {{ border-color: #3A4048; background: #272C32; }}
+QPushButton:hover {{ border-color: {EDGE}; background: {HOVER}; }}
 QPushButton:pressed {{ background: {LINE}; }}
 QPushButton:focus {{ border-color: {ACCENT}; }}
 QPushButton#primary {{ background: {ACCENT}; border-color: {ACCENT}; color: {ON_ACCENT}; font-weight: 600; }}
 QPushButton#primary:hover {{ background: {ACCENT_HOVER}; border-color: {ACCENT_HOVER}; }}
 QPushButton#primary:pressed {{ background: {ACCENT_DOWN}; }}
-QPushButton#flat {{ background: transparent; border-color: transparent; color: {ACCENT}; padding: 4px 8px; }}
+QPushButton#flat {{ background: transparent; border-color: transparent; color: {ACCENT_INK}; padding: 4px 8px; }}
 QPushButton#flat:hover {{ background: {RAISED}; }}
 QPushButton:disabled {{ color: {FAINT}; background: {PANEL}; border-color: {LINE}; }}
 
 QCheckBox {{ spacing: 8px; }}
-QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 4px; border: 1px solid #3A4048; background: {RAISED}; }}
+QCheckBox::indicator {{ width: 15px; height: 15px; border-radius: 4px; border: 1px solid {EDGE}; background: {RAISED}; }}
 QCheckBox::indicator:hover {{ border-color: {ACCENT}; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; image: none; }}
-QRadioButton::indicator {{ width: 14px; height: 14px; border-radius: 7px; border: 1px solid #3A4048; background: {RAISED}; }}
+QRadioButton::indicator {{ width: 14px; height: 14px; border-radius: 7px; border: 1px solid {EDGE}; background: {RAISED}; }}
 QRadioButton::indicator:checked {{ background: {ACCENT}; border: 3px solid {RAISED}; }}
 
 QListWidget#nav {{ background: {PANEL}; border: none; border-right: 1px solid {LINE}; padding: 10px 6px; outline: 0; }}
@@ -202,10 +302,10 @@ QListWidget#choices::item:hover:!selected {{ background: {RAISED}; }}
 
 QTableWidget#connections {{ background: {PANEL}; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
-QScrollBar::handle:vertical {{ background: #343A42; border-radius: 3px; min-height: 30px; }}
-QScrollBar::handle:vertical:hover {{ background: #454C55; }}
+QScrollBar::handle:vertical {{ background: {SCROLL}; border-radius: 3px; min-height: 30px; }}
+QScrollBar::handle:vertical:hover {{ background: {SCROLL_HOVER}; }}
 QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
-QScrollBar::handle:horizontal {{ background: #343A42; border-radius: 3px; min-width: 30px; }}
+QScrollBar::handle:horizontal {{ background: {SCROLL}; border-radius: 3px; min-width: 30px; }}
 QScrollBar::add-line, QScrollBar::sub-line {{ width: 0; height: 0; }}
 QScrollBar::add-page, QScrollBar::sub-page {{ background: transparent; }}
 QProgressBar {{ background: {UNLIT}; border: none; border-radius: 2px; height: 4px; color: transparent; }}
@@ -215,7 +315,7 @@ QLabel#muted {{ color: {MUTED}; }}
 QLabel#title {{ font-size: 13pt; font-weight: 600; }}
 QLabel#legend {{ color: {MUTED}; }}
 QLabel#error {{ color: {INK["Error"]}; }}
-QFrame#banner {{ background: #1E2226; border-bottom: 1px solid {LINE}; }}
+QFrame#banner {{ background: {BANNER}; border-bottom: 1px solid {LINE}; }}
 QFrame#hairline {{ background: {LINE}; max-height: 1px; border: none; }}
 """
 
@@ -224,14 +324,14 @@ QSS = build_qss()
 
 
 def apply_window_chrome(widget) -> None:
-    """Windows 10/11: dark title bar in the panel colour, matching the app."""
+    """Windows 10/11: title bar in the panel colour (dark or light), matching the app."""
     if sys.platform != "win32":
         return
     try:
         import ctypes
         hwnd = int(widget.winId())
         dwm = ctypes.windll.dwmapi
-        on = ctypes.c_int(1)
+        on = ctypes.c_int(0 if MODE == "light" else 1)
         dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(on), ctypes.sizeof(on))      # immersive dark mode
         c = QColor(PANEL)
         colorref = ctypes.c_int(c.red() | (c.green() << 8) | (c.blue() << 16))

@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_NAME = "YDM"
 APP_TITLE = "YDM — Download Manager"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.4.0"
 DEFAULT_PORT = 9614
 ACCENT = "#FFB547"          # amber: only on things you can press (buttons, selection)
 SIGNAL = "#3DDBC0"          # meter light: bytes arriving
@@ -90,6 +90,8 @@ class Settings:
     accent: str = ACCENT                # theme: pressable things
     signal: str = SIGNAL                # theme: meters
     bar_colors: str = "shift"           # progress bar: "shift" (red → green with the %) or "theme"
+    ui_mode: str = "dark"               # dark | light | system
+    remember_dir: str = ""              # "remember this folder" in a download window: every download goes here
 
     @classmethod
     def path(cls) -> Path:

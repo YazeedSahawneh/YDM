@@ -11,17 +11,18 @@ import os
 
 from PySide6.QtCore import QThreadPool, QTimer, Qt, Signal
 from PySide6.QtGui import QFontMetrics
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSizePolicy, QSpinBox,
-                               QStackedWidget, QVBoxLayout, QWidget)
+                               QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPushButton, QSizePolicy,
+                               QSpinBox, QStackedWidget, QVBoxLayout, QWidget)
 
 from .. import tools
 from ..config import APP_NAME, category_for
 from ..engine import Status
 from ..engine.video_downloader import fetch_video_info, has_ffmpeg
-from ..utils import human_eta, human_size, human_speed, open_path, reveal_in_folder
+from ..utils import human_eta, human_size, human_speed, open_path, open_with, reveal_in_folder
 from . import icons, theme
-from .dialogs import _hairline, _Job, find_urls, looks_like_video_page
+from .dialogs import _hairline, _Job, _segment_qss, find_urls, looks_like_video_page
 from .hudbar import HudBar
 
 
@@ -46,7 +47,7 @@ class DownloadWindow(QWidget):
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowIcon(theme.app_icon())
         self.setWindowTitle(APP_NAME)
-        self.setMinimumWidth(580)
+        self.setMinimumWidth(640)
         self.setStyleSheet(f"DownloadWindow {{ background: {theme.BG}; }}")
 
         # header: what is being downloaded
@@ -55,7 +56,7 @@ class DownloadWindow(QWidget):
         self.title.setObjectName("title")
         self.sub = QLabel("")
         self.sub.setObjectName("muted")
-        self.btn_app = btn_app = QPushButton(icons.icon("all", theme.ACCENT, 16), " Open YDM")
+        self.btn_app = btn_app = icons.put(QPushButton(" Open YDM"), "all", "accent_ink", 16)
         btn_app.setObjectName("flat")
         btn_app.setToolTip("Open the full download list")
         btn_app.clicked.connect(self.main.show_normal)
@@ -110,13 +111,13 @@ class DownloadWindow(QWidget):
         self.url_edit = QLineEdit()
         self.url_edit.setPlaceholderText("Paste a link: a file, or a video page (YouTube and 1,800+ sites)")
         self.url_edit.setClearButtonEnabled(True)
-        self.btn_file = QPushButton(icons.icon("document", theme.TEXT, 16), " File")
-        self.btn_video = QPushButton(icons.icon("video", theme.TEXT, 16), " Video")
+        self.btn_file = icons.put(QPushButton(" File"), "document", "text", 16)
+        self.btn_video = icons.put(QPushButton(" Video"), "video", "text", 16)
         group = QButtonGroup(self)
-        for b, side in ((self.btn_file, "left"), (self.btn_video, "right")):
+        for i, b in enumerate((self.btn_file, self.btn_video)):
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
-            b.setStyleSheet(_segment_qss(side))
+            b.setStyleSheet(_segment_qss(i, 2))
             group.addButton(b)
         url_row = QHBoxLayout()
         url_row.setSpacing(0)
@@ -127,15 +128,26 @@ class DownloadWindow(QWidget):
 
         self.name_edit = QLineEdit(self.payload.get("filename") or "")
         self.name_edit.setPlaceholderText("Automatic")
-        self.dir_edit = QLineEdit()
+        save_as = QPushButton("Save as…")
+        save_as.setToolTip("Pick the name and the folder in one go")
+        save_as.clicked.connect(self._save_as_setup)
+        name_row = QHBoxLayout()
+        name_row.addWidget(self.name_edit, 1)
+        name_row.addWidget(save_as)
+        self.dir_edit = QLineEdit(self.settings.remember_dir)
         self.dir_edit.setPlaceholderText(f"{self.settings.download_dir}"
                                          f"{'  ·  by category' if self.settings.use_category_folders else ''}")
-        browse = QPushButton(icons.icon("folder", theme.TEXT, 16), "")
+        browse = icons.put(QPushButton(""), "folder", "text", 16)
         browse.setToolTip("Choose folder")
         browse.clicked.connect(self._browse)
+        self.remember_box = QCheckBox("Remember")
+        self.remember_box.setToolTip("Save every download to this folder from now on "
+                                     "(Options → General puts it back)")
+        self.remember_box.setChecked(bool(self.settings.remember_dir))
         folder_row = QHBoxLayout()
         folder_row.addWidget(self.dir_edit, 1)
         folder_row.addWidget(browse)
+        folder_row.addWidget(self.remember_box)
 
         self.login_user = QLineEdit()
         self.login_user.setPlaceholderText("User name")
@@ -159,7 +171,7 @@ class DownloadWindow(QWidget):
         tools_text = QLabel("1080p and up, MP3 and YouTube need FFmpeg and Deno (about 250 MB, once).")
         tools_text.setObjectName("muted")
         tools_text.setWordWrap(True)
-        tools_btn = QPushButton(icons.icon("tools", theme.TEXT, 16), " Install")
+        tools_btn = icons.put(QPushButton(" Install"), "tools", "text", 16)
         tools_btn.clicked.connect(lambda: self.main.install_video_tools(force=False))
         tr.addWidget(tools_text, 1)
         tr.addWidget(tools_btn)
@@ -169,7 +181,7 @@ class DownloadWindow(QWidget):
         self.form.setVerticalSpacing(10)
         self.form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.form.addRow("Address", url_row)
-        self.form.addRow("Save as", self.name_edit)
+        self.form.addRow("Save as", name_row)
         self.form.addRow("Folder", folder_row)
         self.form.addRow("Quality", self.quality)
         self.form.addRow("Login", login_row)
@@ -183,7 +195,7 @@ class DownloadWindow(QWidget):
         cancel.clicked.connect(self.close)
         self.btn_later.clicked.connect(lambda: self._start(False))
         self.btn_start.clicked.connect(lambda: self._start(True))
-        self.btn_login = QPushButton(icons.icon("key", theme.TEXT, 16), " Login")
+        self.btn_login = icons.put(QPushButton(" Login"), "key", "text", 16)
         self.btn_login.setObjectName("flat")
         self.btn_login.setToolTip("For servers that ask for a user name and password")
         self.btn_login.clicked.connect(lambda: self._show_login(True))
@@ -205,6 +217,22 @@ class DownloadWindow(QWidget):
 
     def _build_progress(self) -> QWidget:
         w = QWidget()
+        addr_legend = QLabel("Address")
+        addr_legend.setFont(theme.label_font(7))
+        addr_legend.setObjectName("legend")
+        self.addr = QLabel("")
+        self.addr.setObjectName("muted")
+        self.addr.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.addr.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        self.btn_copy = copy = icons.put(QPushButton(""), "copy", "text", 14)
+        copy.setObjectName("flat")
+        copy.setToolTip("Copy the download address")
+        copy.clicked.connect(self._copy_address)
+        addr_row = QHBoxLayout()
+        addr_row.setSpacing(10)
+        addr_row.addWidget(addr_legend)
+        addr_row.addWidget(self.addr, 1)
+        addr_row.addWidget(copy)
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(5)
@@ -236,12 +264,12 @@ class DownloadWindow(QWidget):
         conn.addWidget(self.conn_active)
         conn.addStretch(1)
         grid.addLayout(conn, 1, 3)
-        self.btn_pause = QPushButton(icons.icon("pause", theme.TEXT, 16), " Pause")
+        self.btn_pause = icons.put(QPushButton(" Pause"), "pause", "text", 16)
         self.btn_pause.clicked.connect(self._toggle_pause)
-        self.btn_open = QPushButton(icons.icon("open", theme.ON_ACCENT, 16), " Open")
+        self.btn_open = icons.put(QPushButton(" Open"), "open", "on_accent", 16)
         self.btn_open.setObjectName("primary")
         self.btn_open.clicked.connect(self._open_file)
-        self.btn_folder = QPushButton(icons.icon("folder", theme.TEXT, 16), " Open folder")
+        self.btn_folder = icons.put(QPushButton(" Open folder"), "folder", "text", 16)
         self.btn_folder.clicked.connect(self._open_folder)
         self.btn_hide = QPushButton("Hide")
         self.btn_hide.setToolTip("The download keeps going; it stays in YDM's list")
@@ -249,16 +277,29 @@ class DownloadWindow(QWidget):
         self.btn_fix = QPushButton()
         self.btn_fix.setObjectName("primary")
         self.btn_fix.clicked.connect(self._fix)
+        self.btn_later_p = QPushButton("Later")
+        self.btn_later_p.setToolTip("Stop now and keep it in the list; Resume or Start queue continues it")
+        self.btn_later_p.clicked.connect(self._later)
+        self.btn_cancel = QPushButton("Cancel")
+        self.btn_cancel.setToolTip("Stop and delete what was downloaded")
+        self.btn_cancel.clicked.connect(self._cancel)
+        self.btn_with = icons.put(QPushButton(" Open with…"), "open", "text", 16)
+        self.btn_with.setToolTip("Choose the program to open it with")
+        self.btn_with.clicked.connect(self._open_with)
+        self.btn_save = QPushButton("Save as…")
+        self.btn_save.setToolTip("Rename it or move it to another folder (a running download moves when it finishes)")
+        self.btn_save.clicked.connect(self._save_as)
         row = QHBoxLayout()
-        row.addWidget(self.btn_pause)
-        row.addWidget(self.btn_fix)
+        row.setSpacing(8)
+        for b in (self.btn_pause, self.btn_later_p, self.btn_cancel, self.btn_with, self.btn_fix):
+            row.addWidget(b)
         row.addStretch(1)
-        row.addWidget(self.btn_folder)
-        row.addWidget(self.btn_hide)
-        row.addWidget(self.btn_open)
+        for b in (self.btn_save, self.btn_folder, self.btn_hide, self.btn_open):
+            row.addWidget(b)
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 4, 0, 0)
         lay.setSpacing(14)
+        lay.addLayout(addr_row)
         lay.addLayout(grid)
         lay.addWidget(_hairline())
         lay.addLayout(row)
@@ -352,7 +393,19 @@ class DownloadWindow(QWidget):
     def _browse(self):
         d = QFileDialog.getExistingDirectory(self, "Save to", self.dir_edit.text() or self.settings.download_dir)
         if d:
-            self.dir_edit.setText(d)
+            self.dir_edit.setText(os.path.normpath(d))
+
+    def _save_as_setup(self):
+        item = self.manager.get(self.item_id) if self.item_id else None
+        name = self.name_edit.text().strip() or self.name_edit.placeholderText().replace("Automatic", "") \
+            or (item.filename if item else "") or "download"
+        folder = self.dir_edit.text().strip() or (item.save_dir if item and item.save_dir else
+                                                  self.settings.download_dir)
+        path, _ = QFileDialog.getSaveFileName(self, "Save as", os.path.join(folder, name))
+        if path:
+            folder, name = os.path.split(os.path.normpath(path))
+            self.name_edit.setText(name)
+            self.dir_edit.setText(folder)
 
     def _start(self, now: bool):
         url = self.url_edit.text().strip()
@@ -376,6 +429,7 @@ class DownloadWindow(QWidget):
                 self.manager.set_login(self.item_id, user, self.login_pass.text(), self.login_keep.isChecked())
             self.manager.confirm(self.item_id, filename=self.name_edit.text().strip(),
                                  save_dir=self.dir_edit.text().strip(), start=now)
+        self._remember_folder()
         self._prestarted_url = ""                    # confirmed: closing no longer cancels it
         if now and self.settings.progress_window:
             self._to_progress()
@@ -391,6 +445,63 @@ class DownloadWindow(QWidget):
             self.show()
         self._tick()
         self.adjustSize()
+
+    def _remember_folder(self):
+        folder = self.dir_edit.text().strip()
+        want = folder if self.remember_box.isChecked() and folder else ""
+        if want != self.settings.remember_dir:
+            self.settings.remember_dir = want
+            self.settings.save()
+
+    def _item(self):
+        return self.manager.get(self.item_id) if self.item_id else None
+
+    def _copy_address(self):
+        item = self._item()
+        if item:
+            QGuiApplication.clipboard().setText(item.url)
+            self.btn_copy.setText(" Copied")
+            QTimer.singleShot(1500, lambda: self.btn_copy.setText(""))
+
+    def _later(self):
+        item = self._item()
+        if item:
+            self.manager.later(item.id)
+            self.close()
+
+    def _cancel(self):
+        item = self._item()
+        if not item:
+            return
+        if item.downloaded > 0 and QMessageBox.question(
+                self, APP_NAME, f"Cancel {item.dest_name or item.filename or 'this download'} and delete what "
+                                f"was downloaded ({human_size(item.downloaded)})?") != QMessageBox.Yes:
+            return
+        self.manager.discard(item.id)
+        self.item_id = None
+        self.close()
+
+    def _open_with(self):
+        item = self._item()
+        if item and os.path.exists(item.path):
+            self.manager.mark_seen(item.id)
+            open_with(item.path)
+
+    def _save_as(self):
+        item = self._item()
+        if not item:
+            return
+        name = item.dest_name or item.filename or item.title or "download"
+        folder = item.dest_dir or item.save_dir or self.settings.download_dir
+        path, _ = QFileDialog.getSaveFileName(self, "Save as", os.path.join(folder, name))
+        if not path:
+            return
+        folder, new = os.path.split(os.path.normpath(path))
+        old_ext = os.path.splitext(item.filename or "")[1]
+        if old_ext and not os.path.splitext(new)[1]:
+            new += old_ext                           # keep the type when only a name was typed
+        self.manager.rename(item.id, new, folder)
+        self._tick()
 
     def _show_login(self, focus: bool = False):
         if not self.form.isRowVisible(4):
@@ -413,12 +524,12 @@ class DownloadWindow(QWidget):
             self.main.login_for(item.id)
 
     def apply_theme(self):
-        self.btn_app.setIcon(icons.icon("all", theme.ACCENT, 16))
-        self.btn_open.setIcon(icons.icon("open", theme.ON_ACCENT, 16))
-        self.btn_file.setStyleSheet(_segment_qss("left"))
-        self.btn_video.setStyleSheet(_segment_qss("right"))
+        self.btn_file.setStyleSheet(_segment_qss(0, 2))
+        self.btn_video.setStyleSheet(_segment_qss(1, 2))
         self.setStyleSheet(f"DownloadWindow {{ background: {theme.BG}; }}")
+        theme.apply_window_chrome(self)
         self.meter.update()
+        self._tick()
 
     def _toggle_pause(self):
         item = self.manager.get(self.item_id) if self.item_id else None
@@ -516,7 +627,14 @@ class DownloadWindow(QWidget):
             self.live.setStyleSheet("")
         paused = item.status in (Status.PAUSED, Status.ERROR)
         self.btn_pause.setText(" Resume" if paused else " Pause")
-        self.btn_pause.setIcon(icons.icon("resume" if paused else "pause", theme.TEXT, 16))
+        icons.put(self.btn_pause, "resume" if paused else "pause", "text", 16)
+        for b in (self.btn_later_p, self.btn_cancel):
+            b.setVisible(not done)
+        self.btn_with.setVisible(done)
+        self.btn_save.setVisible(item.status != Status.PROCESSING)
+        fm = QFontMetrics(self.addr.font())
+        self.addr.setText(fm.elidedText(item.url, Qt.ElideMiddle, max(120, self.addr.width())))
+        self.addr.setToolTip(item.url)
 
     # ------------------------------------------------------------- lifecycle
     def showEvent(self, event):
@@ -540,8 +658,3 @@ def _elide(label: QLabel, text: str, width: int) -> str:
     return QFontMetrics(label.font()).elidedText(text, Qt.ElideMiddle, width)
 
 
-def _segment_qss(side: str) -> str:
-    radius = ("border-top-right-radius:0; border-bottom-right-radius:0;" if side == "left"
-              else "border-top-left-radius:0; border-bottom-left-radius:0; margin-left:-1px;")
-    return (f"QPushButton {{ padding: 6px 12px; {radius} }}"
-            f"QPushButton:checked {{ background: {theme.SELECT}; border-color: {theme.ACCENT}; color: {theme.ACCENT}; }}")

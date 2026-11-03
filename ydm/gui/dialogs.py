@@ -22,6 +22,18 @@ VIDEO_SITES = ("youtube.com", "youtu.be", "vimeo.com", "tiktok.com", "instagram.
 URL_RE = re.compile(r"(?:https?|ftps?)://[^\s\"'<>]+", re.I)
 
 
+def _segment_qss(index: int, count: int) -> str:
+    """Joined toggle buttons (File | Video, Dark | Light | Match Windows)."""
+    radius = ""
+    if index > 0:
+        radius += "border-top-left-radius:0; border-bottom-left-radius:0; margin-left:-1px;"
+    if index < count - 1:
+        radius += "border-top-right-radius:0; border-bottom-right-radius:0;"
+    return (f"QPushButton {{ padding: 6px 12px; {radius} }}"
+            f"QPushButton:checked {{ background: {theme.SELECT}; border-color: {theme.ACCENT_INK}; "
+            f"color: {theme.ACCENT_INK}; }}")
+
+
 def looks_like_video_page(url: str) -> bool:
     host = urlparse(url).netloc.lower()
     return any(host == s or host.endswith("." + s) for s in VIDEO_SITES)
@@ -200,11 +212,11 @@ class RenewDialog(Dialog):
         body.setTextFormat(Qt.RichText)
         hint = QLabel("No browser page? Paste the new link instead.")
         hint.setObjectName("muted")
-        self.btn_page = QPushButton(icons.icon("open", theme.ON_ACCENT, 16),
-                                    " Open the page and wait" if page else " Wait for the link")
+        self.btn_page = icons.put(QPushButton(" Open the page and wait" if page else " Wait for the link"),
+                                  "open", "on_accent", 16)
         self.btn_page.setObjectName("primary")
         self.btn_page.setDefault(True)
-        paste = QPushButton(icons.icon("link", theme.TEXT, 16), " Paste a link…")
+        paste = icons.put(QPushButton(" Paste a link…"), "link", "text", 16)
         cancel = QPushButton("Cancel")
         self.btn_page.clicked.connect(lambda: self._pick("wait"))
         paste.clicked.connect(lambda: self._pick("paste"))
@@ -331,7 +343,7 @@ class SettingsDialog(Dialog):
     install_tools = Signal()
     check_updates = Signal()
     update_ytdlp = Signal()
-    theme_preview = Signal(str, str, str)       # accent, signal, bar mode: applied live, undone on Cancel
+    theme_preview = Signal(str, str, str, str)  # accent, signal, bar mode, ui mode: applied live, undone on Cancel
 
     def __init__(self, settings: Settings, parent=None, open_tab: int = 0):
         super().__init__(parent)
@@ -344,18 +356,24 @@ class SettingsDialog(Dialog):
         self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         nav_icons = ["settings", "speed", "scheduler", "link", "video", "globe", "palette", "update"]
         for name, ic in zip(PAGES, nav_icons):
-            QListWidgetItem(icons.icon(ic, theme.MUTED, 18), name, self.nav)
+            QListWidgetItem(icons.icon(ic, "muted", 18), name, self.nav).setData(Qt.UserRole, ic)
         self.pages = QStackedWidget()
 
         # General
         g, gf = self._page("General", "Where files go and how YDM behaves.")
         self.dir_edit = QLineEdit(settings.download_dir)
-        browse = QPushButton(icons.icon("folder", theme.TEXT, 16), "")
+        browse = icons.put(QPushButton(""), "folder", "text", 16)
         browse.clicked.connect(self._browse)
         row = QHBoxLayout()
         row.addWidget(self.dir_edit, 1)
         row.addWidget(browse)
         gf.addRow("Download folder", row)
+        self.remember_box = QCheckBox(f"Always save to {settings.remember_dir}  (picked in a download window)"
+                                      if settings.remember_dir else "Always save to the folder I pick in a download window")
+        self.remember_box.setChecked(bool(settings.remember_dir))
+        self.remember_box.setEnabled(bool(settings.remember_dir))
+        self.remember_box.setToolTip("Untick to go back to the download folder above")
+        gf.addRow("", self.remember_box)
         self.cat_box = QCheckBox("Sort into category folders (Video, Music, Programs…)")
         self.cat_box.setChecked(settings.use_category_folders)
         gf.addRow("", self.cat_box)
@@ -434,9 +452,9 @@ class SettingsDialog(Dialog):
         self.tools_status = QLabel()
         self.tools_status.setWordWrap(True)
         vf.addRow("Video tools", self.tools_status)
-        tools_btn = QPushButton(icons.icon("tools", theme.TEXT, 16), " Install / repair")
+        tools_btn = icons.put(QPushButton(" Install / repair"), "tools", "text", 16)
         tools_btn.clicked.connect(self.install_tools.emit)
-        ytdlp_btn = QPushButton(icons.icon("refresh", theme.TEXT, 16), " Update yt-dlp now")
+        ytdlp_btn = icons.put(QPushButton(" Update yt-dlp now"), "refresh", "text", 16)
         ytdlp_btn.clicked.connect(self.update_ytdlp.emit)
         trow = QHBoxLayout()
         trow.addWidget(tools_btn)
@@ -474,7 +492,7 @@ class SettingsDialog(Dialog):
         up.addWidget(self.proxy_user, 1)
         up.addWidget(self.proxy_pass, 1)
         nf.addRow("Proxy login", up)
-        self.proxy_test = QPushButton(icons.icon("globe", theme.TEXT, 16), " Test")
+        self.proxy_test = icons.put(QPushButton(" Test"), "globe", "text", 16)
         self.proxy_test.clicked.connect(self._test_proxy)
         self.proxy_result = QLabel("")
         self.proxy_result.setObjectName("muted")
@@ -489,7 +507,7 @@ class SettingsDialog(Dialog):
         self.logins.setObjectName("choices")
         self.logins.setFixedHeight(118)
         self._fill_logins()
-        add_login = QPushButton(icons.icon("key", theme.TEXT, 16), " Add…")
+        add_login = icons.put(QPushButton(" Add…"), "key", "text", 16)
         add_login.clicked.connect(self._add_login)
         del_login = QPushButton("Remove")
         del_login.clicked.connect(self._remove_login)
@@ -507,7 +525,23 @@ class SettingsDialog(Dialog):
         a, af = self._page("Appearance", "Pick the colour of the controls and meters. "
                                          "It changes right away; Cancel puts it back.")
         self._accent, self._signal = settings.accent, settings.signal
-        self._saved_theme = (settings.accent, settings.signal, settings.bar_colors)
+        self._saved_theme = (settings.accent, settings.signal, settings.bar_colors, settings.ui_mode)
+        mode_row = QHBoxLayout()
+        mode_row.setSpacing(0)
+        self.mode_group = QButtonGroup(self)
+        for i, (key, label, ic) in enumerate((("dark", " Dark", "moon"), ("light", " Light", "sun"),
+                                              ("system", " Match Windows", "settings"))):
+            b = icons.put(QPushButton(label), ic, "text", 16)
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setProperty("mode", key)
+            b.setStyleSheet(_segment_qss(i, 3))
+            b.setChecked(settings.ui_mode == key)
+            self.mode_group.addButton(b)
+            mode_row.addWidget(b)
+        mode_row.addStretch(1)
+        self.mode_group.buttonClicked.connect(lambda _b: self._emit_theme())
+        af.addRow("Mode", mode_row)
         sw_row = QHBoxLayout()
         sw_row.setSpacing(4)
         self.swatches = QButtonGroup(self)
@@ -548,7 +582,7 @@ class SettingsDialog(Dialog):
         self.auto_box = QCheckBox("Check for updates every day and download them in the background")
         self.auto_box.setChecked(settings.auto_update)
         uf.addRow("", self.auto_box)
-        check = QPushButton(icons.icon("update", theme.TEXT, 16), " Check now")
+        check = icons.put(QPushButton(" Check now"), "update", "text", 16)
         check.clicked.connect(self.check_updates.emit)
         check.setEnabled(updater.enabled())
         crow = QHBoxLayout()
@@ -655,6 +689,10 @@ class SettingsDialog(Dialog):
     def _bar_mode(self) -> str:
         return "theme" if self.bar_theme.isChecked() else "shift"
 
+    def _ui_mode(self) -> str:
+        b = self.mode_group.checkedButton()
+        return b.property("mode") if b else "dark"
+
     def _pick_colors(self, accent: str, signal: str):
         self._accent, self._signal = accent, signal
         self._emit_theme()
@@ -679,14 +717,24 @@ class SettingsDialog(Dialog):
         self.btn_signal.setIcon(icons.icon("speed", self._signal, 16))
 
     def _emit_theme(self):
-        self.theme_preview.emit(self._accent, self._signal, self._bar_mode())
+        self.theme_preview.emit(self._accent, self._signal, self._bar_mode(), self._ui_mode())
+        self._restyle()
+
+    def _restyle(self):
+        """After a live theme switch: this dialog's own hand-set colours."""
         self._paint_custom_buttons()
+        for i in range(self.nav.count()):
+            it = self.nav.item(i)
+            it.setIcon(icons.icon(it.data(Qt.UserRole), "muted", 18))
+        for i, b in enumerate(self.mode_group.buttons()):
+            b.setStyleSheet(_segment_qss(i, 3))
+        theme.apply_window_chrome(self)
         self.preview.update()
         for b in self.swatches.buttons():
             b.update()
 
     def reject(self):
-        if (self._accent, self._signal, self._bar_mode()) != self._saved_theme:
+        if (self._accent, self._signal, self._bar_mode(), self._ui_mode()) != self._saved_theme:
             self.theme_preview.emit(*self._saved_theme)
         super().reject()
 
@@ -751,5 +799,7 @@ class SettingsDialog(Dialog):
         s.proxy_port = self.proxy_port.value()
         s.proxy_user = self.proxy_user.text().strip()
         s.proxy_pass = vault.protect(self.proxy_pass.text())
-        s.accent, s.signal, s.bar_colors = self._accent, self._signal, self._bar_mode()
+        s.accent, s.signal, s.bar_colors, s.ui_mode = self._accent, self._signal, self._bar_mode(), self._ui_mode()
+        if not self.remember_box.isChecked():
+            s.remember_dir = ""
         return s

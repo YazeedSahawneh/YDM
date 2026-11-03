@@ -1,6 +1,7 @@
 """YDM's icon set, drawn in code: one 24-unit grid, one stroke weight, round caps.
 
-icon("pause") -> QIcon in the default label colour; icon("add", ACCENT) for a tinted one.
+icon("pause") -> QIcon in the current label colour; icon("add", "accent") for a tinted one.
+put(button, "pause", "text") also re-tints it when the theme changes (retint()).
 """
 from __future__ import annotations
 
@@ -45,6 +46,14 @@ def _ellipse(cx, cy, rx, ry) -> QPainterPath:
     path = QPainterPath()
     path.addEllipse(QPointF(cx, cy), rx, ry)
     return path
+
+
+def _moon() -> QPainterPath:
+    outer = QPainterPath()
+    outer.addEllipse(QPointF(12, 12), 8, 8)
+    bite = QPainterPath()
+    bite.addEllipse(QPointF(16.5, 8.5), 6.5, 6.5)
+    return outer.subtracted(bite)
 
 
 def _folder() -> QPainterPath:
@@ -108,6 +117,11 @@ def _glyph(name: str) -> list[tuple[QPainterPath, bool]]:
         "copy": [(_rect(8, 8, 12, 12, 2), False), (_p((16, 5), (16, 4), (4, 4), (4, 16), (5, 16)), False)],
         "power": [(_arc(12, 13, 7, 125, 290), False), (_p((12, 3.5), (12, 11)), False)],
         "speed": [(_arc(12, 15, 8.5, 0, 180), False), (_p((12, 15), (16.5, 9.5)), False)],
+        "sun": [(_circle(12, 12, 4), False)] + [
+            (_p((12 + 6.5 * c, 12 + 6.5 * s), (12 + 8.8 * c, 12 + 8.8 * s)), False)
+            for c, s in ((1, 0), (-1, 0), (0, 1), (0, -1), (0.707, 0.707), (-0.707, 0.707), (0.707, -0.707), (-0.707, -0.707))
+        ],
+        "moon": [(_moon(), False)],
         "globe": [(_circle(12, 12, 8), False), (_p((4, 12), (20, 12)), False), (_ellipse(12, 12, 3.6, 8), False)],
         "key": [(_circle(8, 12, 3.6), False), (_p((11.6, 12), (20.5, 12)), False),
                 (_p((17.5, 12), (17.5, 15.2)), False), (_p((20.5, 12), (20.5, 14.5)), False)],
@@ -119,8 +133,48 @@ def _glyph(name: str) -> list[tuple[QPainterPath, bool]]:
     return g.get(name, g["other"])
 
 
-@lru_cache(maxsize=256)
-def pixmap(name: str, color: str = theme.TEXT, size: int = 24, dpr: float = 2.0) -> QPixmap:
+ROLES = {"text": "TEXT", "muted": "MUTED", "accent": "ACCENT", "accent_ink": "ACCENT_INK", "on_accent": "ON_ACCENT"}
+
+
+def _color(color: str | None) -> str:
+    """A colour, or a role name ("text", "muted", "accent", …) resolved against the current theme."""
+    if not color:
+        return theme.TEXT
+    return getattr(theme, ROLES[color]) if color in ROLES else color
+
+
+def pixmap(name: str, color: str | None = None, size: int = 24, dpr: float = 2.0) -> QPixmap:
+    return _pixmap(name, _color(color), size, dpr)
+
+
+def icon(name: str, color: str | None = None, size: int = 24) -> QIcon:
+    return _icon(name, _color(color), size, theme.FAINT)
+
+
+def put(target, name: str, role: str = "text", size: int = 16):
+    """Set a themed icon on a button or action and remember it, so retint() can recolour it
+    when the theme changes (light/dark, accent). Returns the target."""
+    target.setProperty("ydm_icon", f"{name}|{role}|{size}")
+    target.setIcon(icon(name, role, size))
+    return target
+
+
+def retint(roots=()) -> None:
+    """Recolour every icon set with put() in all open widgets (and the actions under `roots`)."""
+    from PySide6.QtGui import QAction
+    from PySide6.QtWidgets import QApplication
+    targets = list(QApplication.allWidgets())
+    for root in roots:
+        targets += root.findChildren(QAction)
+    for t in targets:
+        spec = t.property("ydm_icon")
+        if spec:
+            name, role, size = spec.split("|")
+            t.setIcon(icon(name, role, int(size)))
+
+
+@lru_cache(maxsize=512)
+def _pixmap(name: str, color: str, size: int = 24, dpr: float = 2.0) -> QPixmap:
     pm = QPixmap(int(size * dpr), int(size * dpr))
     pm.setDevicePixelRatio(dpr)
     pm.fill(Qt.transparent)
@@ -137,11 +191,11 @@ def pixmap(name: str, color: str = theme.TEXT, size: int = 24, dpr: float = 2.0)
     return pm
 
 
-@lru_cache(maxsize=256)
-def icon(name: str, color: str = theme.TEXT, size: int = 24) -> QIcon:
+@lru_cache(maxsize=512)
+def _icon(name: str, color: str, size: int, faint: str) -> QIcon:
     ic = QIcon()
-    ic.addPixmap(pixmap(name, color, size), QIcon.Normal)
-    ic.addPixmap(pixmap(name, theme.FAINT, size), QIcon.Disabled)
+    ic.addPixmap(_pixmap(name, color, size), QIcon.Normal)
+    ic.addPixmap(_pixmap(name, faint, size), QIcon.Disabled)
     return ic
 
 

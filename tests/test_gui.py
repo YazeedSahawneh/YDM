@@ -98,6 +98,22 @@ sd = SettingsDialog(s, w, 6); sd.show(); pump(0.1)
 sd.theme_preview.connect(w.apply_theme)
 sd._pick_colors(*theme.PRESETS["Rose"]); assert theme.ACCENT == theme.PRESETS["Rose"][0] and theme.ACCENT in app.styleSheet()
 sd.reject(); assert theme.ACCENT == s.accent.upper(), "Cancel didn't restore the theme"
+# light mode switches in place and back
+w.apply_theme(s.accent, s.signal, s.bar_colors, "light"); pump(0.3)
+assert theme.MODE == "light" and theme.BG in app.styleSheet(); w.grab().save(f"{out}/light.png")
+lw2 = w.open_download_window(item_id=pre.id); pump(0.4); lw2.grab().save(f"{out}/light-window.png")
+assert lw2.btn_with.isVisible() and lw2.btn_save.isVisible() and not lw2.btn_cancel.isVisible()
+assert pre.url in lw2.addr.toolTip(); lw2.close()
+w.apply_theme(s.accent, s.signal, s.bar_colors, "dark"); assert theme.MODE == "dark"
+# Save as on a finished file moves it now
+newdir = os.path.join(os.environ["APPDATA"], "moved"); m.rename(pre.id, "final-name.zip", newdir)
+assert pre.path == os.path.join(newdir, "final-name.zip") and os.path.exists(pre.path), pre.path
+# remember this folder: the next downloads go there
+rw = w.open_download_window(url=base + "/remember.bin"); pump(0.6)
+rw.dir_edit.setText(os.path.join(os.environ["APPDATA"], "always")); rw.remember_box.setChecked(True); rw._start(True)
+assert s.remember_dir.endswith("always") and m.resolve_dir(pre) == s.remember_dir
+# running download: Later parks it (paused, in the list); Cancel removes it
+pump(0.2); rw.close(); s.remember_dir = ""
 # a server asking for a login: the download window shows the login row
 from ydm.engine.item import LOGIN_NEEDED
 lw = w.open_download_window(url=base + "/needs-login.bin"); pump(1.0)
