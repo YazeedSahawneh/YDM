@@ -1,8 +1,10 @@
 """Tiny local HTTP endpoint the browser extension talks to (127.0.0.1 only).
 
 GET  /ping  -> {"app": "YDM", "version": "..."}
-POST /add   -> {"url": "...", "kind": "file"|"video", "filename", "referrer",
-                "cookies", "userAgent", "fileSize"}
+POST /add   -> {"url": "...", "kind": "file"|"video"|"batch", "filename", "referrer",
+                "cookies", "userAgent", "fileSize", "urls" (batch only),
+                "video_format", "convert", "quick" (start a video without asking)}
+POST /info  -> {"url", "cookies", "userAgent", "referrer"} → the video's quality list
 """
 from __future__ import annotations
 
@@ -18,6 +20,7 @@ ALLOWED_ORIGINS = ("chrome-extension://", "moz-extension://", "extension://")
 
 class _Handler(BaseHTTPRequestHandler):
     on_add: Callable[[dict], None] = staticmethod(lambda payload: None)
+    on_info: Callable[[dict], dict] = staticmethod(lambda payload: {"error": "not available"})
 
     def log_message(self, *args):  # silence console
         pass
@@ -54,7 +57,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._origin_ok():
             return self._send(403, {"error": "forbidden"})
-        if not self.path.startswith("/add"):
+        if not self.path.startswith(("/add", "/info")):
             return self._send(404, {"error": "not found"})
         try:
             length = min(int(self.headers.get("Content-Length", 0)), 1_000_000)
@@ -62,15 +65,24 @@ class _Handler(BaseHTTPRequestHandler):
         except (ValueError, TypeError):
             return self._send(400, {"error": "bad json"})
         url = str(payload.get("url", ""))
-        if not url.lower().startswith(("http://", "https://")):
+        if not url.lower().startswith(("http://", "https://", "ftp://", "ftps://")):
             return self._send(400, {"error": "only http/https urls"})
+        if self.path.startswith("/info"):
+            try:
+                return self._send(200, type(self).on_info(payload))
+            except Exception as exc:  # noqa: BLE001 - reported to the extension
+                msg = str(exc).replace("ERROR: ", "").splitlines()
+                return self._send(502, {"error": (msg[0] if msg else exc.__class__.__name__)[:200]})
         type(self).on_add(payload)
         self._send(200, {"ok": True})
 
 
 class LocalServer:
-    def __init__(self, port: int, on_add: Callable[[dict], None]):
-        handler = type("Handler", (_Handler,), {"on_add": staticmethod(on_add)})
+    def __init__(self, port: int, on_add: Callable[[dict], None], on_info: Callable[[dict], dict] | None = None):
+        attrs = {"on_add": staticmethod(on_add)}
+        if on_info:
+            attrs["on_info"] = staticmethod(on_info)
+        handler = type("Handler", (_Handler,), attrs)
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)   # raises OSError if busy
         self.httpd.daemon_threads = True
         self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)

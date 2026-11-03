@@ -8,13 +8,19 @@ import json
 import sys
 import urllib.request
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from ydm import tools
 
-from ydm.config import APP_NAME, Settings
-from ydm.engine import DownloadManager
-from ydm.gui import theme
-from ydm.gui.main_window import MainWindow
-from ydm.server import LocalServer
+tools.activate_ytdlp_override()        # must run before anything imports yt_dlp
+
+from PySide6.QtCore import Qt  # noqa: E402
+from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+
+from ydm.config import APP_NAME, Settings  # noqa: E402
+from ydm.engine import DownloadManager, net  # noqa: E402
+from ydm.gui import hudbar, theme  # noqa: E402
+from ydm.gui.main_window import MainWindow  # noqa: E402
+from ydm.engine.video_downloader import browser_info  # noqa: E402
+from ydm.server import LocalServer  # noqa: E402
 
 
 def send_to_running_instance(port: int, url: str | None) -> bool:
@@ -34,25 +40,36 @@ def send_to_running_instance(port: int, url: str | None) -> bool:
 
 
 def main() -> int:
-    url_arg = next((a for a in sys.argv[1:] if a.lower().startswith(("http://", "https://"))), None)
+    url_arg = next((a for a in sys.argv[1:] if a.lower().startswith(("http://", "https://", "ftp://", "ftps://"))),
+                   None)
     settings = Settings.load()
 
     if send_to_running_instance(settings.port, url_arg):
         return 0
 
+    if sys.platform == "win32":
+        # Own taskbar identity, so Windows shows YDM's icon instead of Python's.
+        import ctypes
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(f"Yazeed.{APP_NAME}")
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
+    theme.set_colors(settings.accent, settings.signal)
+    hudbar.BAR_MODE[0] = settings.bar_colors
     app.setStyleSheet(theme.QSS)
     app.setWindowIcon(theme.app_icon())
     app.setQuitOnLastWindowClosed(False)       # keep running in the tray
+    for effect in (Qt.UI_AnimateMenu, Qt.UI_FadeMenu, Qt.UI_AnimateCombo, Qt.UI_AnimateTooltip, Qt.UI_FadeTooltip):
+        app.setEffectEnabled(effect, False)    # menus and lists open instantly
 
+    net.warm_up()                              # TLS setup off the critical path of the first download
     manager = DownloadManager(settings)
     window = MainWindow(manager, settings)
 
     server = None
     try:
-        server = LocalServer(settings.port, lambda payload: window.browser_request.emit(payload))
+        server = LocalServer(settings.port, lambda payload: window.browser_request.emit(payload), browser_info)
         server.start()
     except OSError:
         QMessageBox.warning(window, APP_NAME,

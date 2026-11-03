@@ -9,7 +9,7 @@ from ydm.config import Settings
 from ydm.engine import DownloadManager, Status
 from ydm.gui import theme
 from ydm.gui.main_window import MainWindow
-from ydm.gui.dialogs import AddDownloadDialog, SettingsDialog
+from ydm.gui.dialogs import SettingsDialog
 from ydm.server import LocalServer
 
 DATA = os.urandom(40 * 1024 * 1024)
@@ -60,11 +60,51 @@ pump(3.5)
 print([ (i.filename, i.status, f"{i.progress:.0%}") for i in m.items()])
 w.grab().save(f"{out}/running.png")
 
-d = AddDownloadDialog(s, base + "/file.zip"); d.show(); pump(1.5)
-print("dialog info:", d.info.text(), "| placeholder:", d.name_edit.placeholderText())
-d.grab().save(f"{out}/add.png"); d.close()
+# IDM-style pre-start: the window opens and the file is already downloading before "Start"
+d = w.open_download_window(url=base + "/file.zip"); pump(1.5)
+pre = m.get(d.item_id)
+print("prestart:", d.live.text(), "| placeholder:", d.name_edit.placeholderText())
+assert pre and pre.pending and pre.downloaded > 0, "did not start before confirming"
+assert pre.id not in w.model.ids, "pending download leaked into the list"
+d.grab().save(f"{out}/add.png")
+d.name_edit.setText("renamed.zip"); d._start(True); pump(0.6)
+assert not pre.pending and pre.id in w.model.ids and d.pages.currentIndex() == 1
+d.grab().save(f"{out}/progress.png")
+d.conn_spin.setValue(3); assert pre.connections == 3, "window's connection count didn't reach the download"
+for _ in range(60):
+    if pre.status == Status.COMPLETED: break
+    pump(0.5)
+assert pre.filename == "renamed.zip" and os.path.exists(pre.path), (pre.status, pre.filename)
+pump(0.4); d.grab().save(f"{out}/done.png"); d.close()
+# cancelling a pre-started download removes it and its partial file
+c = w.open_download_window(url=base + "/other.iso"); pump(1.0)
+cid = m.get(c.item_id); part = cid.part_path; c.close(); pump(1.5)
+assert m.get(cid.id) is None and not os.path.exists(part), "cancel left something behind"
+print("prestart / confirm / rename / cancel OK")
 sd = SettingsDialog(s, w, 2); sd.show(); pump(0.3); sd.grab().save(f"{out}/settings.png"); sd.close()
-w.sidebar.setCurrentRow(1); pump(0.6); print("Downloading filter rows:", len(w.model.ids))
-w.sidebar.setCurrentRow(0)
+w.sidebar.setCurrentItem(w._tree_items["Downloading"]); pump(0.6); print("Downloading filter rows:", len(w.model.ids))
+w.sidebar.setCurrentItem(w._tree_items["All downloads"])
+w.table.selectRow(0); pump(0.8); w.grab().save(f"{out}/details.png")
+assert w.details.item is not None, "details pane did not follow the selection"
+from ydm.gui.dialogs import BatchDialog, find_urls
+assert find_urls("see https://a.example/x.zip, and https://b.example/y.iso.") == ["https://a.example/x.zip", "https://b.example/y.iso"]
+bd = BatchDialog(["https://a.example/x.zip", "https://b.example/y.iso"], w); bd.show(); pump(0.2)
+assert len(bd.urls()) == 2; bd.grab().save(f"{out}/batch.png"); bd.close()
+for tab in (4, 5, 6, 7):
+    sd = SettingsDialog(s, w, tab); sd.show(); pump(0.2); sd.grab().save(f"{out}/settings{tab}.png"); sd.close()
+vd = w.open_download_window(kind="video"); pump(0.3); vd.grab().save(f"{out}/add-video.png"); vd.close()
+# theme colours switch in place, Cancel in Appearance restores them
+sd = SettingsDialog(s, w, 6); sd.show(); pump(0.1)
+sd.theme_preview.connect(w.apply_theme)
+sd._pick_colors(*theme.PRESETS["Rose"]); assert theme.ACCENT == theme.PRESETS["Rose"][0] and theme.ACCENT in app.styleSheet()
+sd.reject(); assert theme.ACCENT == s.accent.upper(), "Cancel didn't restore the theme"
+# a server asking for a login: the download window shows the login row
+from ydm.engine.item import LOGIN_NEEDED
+lw = w.open_download_window(url=base + "/needs-login.bin"); pump(1.0)
+li = m.get(lw.item_id); m.pause(li.id); m._wait_stopped(li.id)          # stand in for a server's 401
+li.status, li.error = Status.ERROR, f"{LOGIN_NEEDED}: enter a user name and password"
+pump(0.4); assert lw.form.isRowVisible(4), "login row didn't appear"; lw.grab().save(f"{out}/login.png"); lw.close()
+assert find_urls("ftp://files.example/a.iso") == ["ftp://files.example/a.iso"]
+print("theme / connections / login OK")
 server.stop(); m.shutdown()
 print("GUI OK")

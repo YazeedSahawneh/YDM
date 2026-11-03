@@ -17,12 +17,17 @@ class Status:
     ACTIVE = {CONNECTING, DOWNLOADING, PROCESSING}
 
 
+EXPIRED = "Link expired"              # error prefixes the GUI keys off
+LOGIN_NEEDED = "Login required"
+
+
 @dataclass
 class Segment:
     start: int
     end: int          # inclusive
     done: int = 0
     active: bool = field(default=False, compare=False)   # runtime only
+    speed: float = field(default=0.0, compare=False)     # runtime only, bytes/s of its connection
 
     @property
     def pos(self) -> int:
@@ -56,11 +61,20 @@ class DownloadItem:
     headers: dict = field(default_factory=dict)
     video_format: str = ""
     title: str = ""
+    seen: bool = True                  # False = finished but the user hasn't looked at it yet
+    pending: bool = False              # started before the user confirmed (IDM-style pre-start)
+    dest_dir: str = ""                 # chosen while it was already downloading: applied at the end
+    dest_name: str = ""
+    convert: str = ""                  # video: "mp3" = extract audio as MP3
+    parts: list = field(default_factory=list)   # video: per-stream progress, so a pause resumes
+    auth_user: str = ""                # login for this download (Basic / Digest / NTLM / FTP)
+    auth_pass: str = ""                # protected with vault.protect (DPAPI on Windows)
     # runtime only
     speed: float = 0.0
     eta: float = -1.0
+    retries: int = 0
 
-    RUNTIME = ("speed", "eta")
+    RUNTIME = ("speed", "eta", "retries")
 
     @property
     def path(self) -> str:
@@ -70,6 +84,15 @@ class DownloadItem:
     @property
     def part_path(self) -> str:
         return self.path + ".ydm" if self.path else ""
+
+    @property
+    def expired(self) -> bool:
+        """The link stopped working (expired, or needs the page again): renew the address."""
+        return self.status == Status.ERROR and self.error.startswith(EXPIRED)
+
+    @property
+    def needs_login(self) -> bool:
+        return self.status == Status.ERROR and self.error.startswith(LOGIN_NEEDED)
 
     @property
     def progress(self) -> float:

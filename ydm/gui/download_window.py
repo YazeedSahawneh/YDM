@@ -1,0 +1,547 @@
+"""One small window per download, like IDM's "Download File Info" + progress box.
+
+The download starts the moment a link arrives (pending, hidden from the list),
+so while you pick a name and folder the bytes are already coming in; pressing
+Start just confirms it. The same window then shows progress and a finish
+screen. The full app never has to open.
+"""
+from __future__ import annotations
+
+import os
+
+from PySide6.QtCore import QThreadPool, QTimer, Qt, Signal
+from PySide6.QtGui import QFontMetrics
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFileDialog, QFormLayout, QGridLayout, QHBoxLayout, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem, QPushButton, QSizePolicy, QSpinBox,
+                               QStackedWidget, QVBoxLayout, QWidget)
+
+from .. import tools
+from ..config import APP_NAME, category_for
+from ..engine import Status
+from ..engine.video_downloader import fetch_video_info, has_ffmpeg
+from ..utils import human_eta, human_size, human_speed, open_path, reveal_in_folder
+from . import icons, theme
+from .dialogs import _hairline, _Job, find_urls, looks_like_video_page
+from .hudbar import HudBar
+
+
+class DownloadWindow(QWidget):
+    closed = Signal(object)
+
+    def __init__(self, main, *, url: str = "", payload: dict | None = None, kind: str | None = None,
+                 item_id: str | None = None):
+        super().__init__(None, Qt.Window)
+        self.main, self.manager, self.settings = main, main.manager, main.settings
+        self.payload = payload or {}
+        self.headers = {k: v for k, v in {
+            "Referer": self.payload.get("referrer") or "",
+            "User-Agent": self.payload.get("userAgent") or "",
+            "Cookie": self.payload.get("cookies") or "",
+        }.items() if v}
+        self.item_id = item_id
+        self._prestarted_url = ""
+        self._info: dict | None = None
+        self._ticket = 0
+        self._jobs: list[_Job] = []
+        self.setAttribute(Qt.WA_DeleteOnClose)
+        self.setWindowIcon(theme.app_icon())
+        self.setWindowTitle(APP_NAME)
+        self.setMinimumWidth(580)
+        self.setStyleSheet(f"DownloadWindow {{ background: {theme.BG}; }}")
+
+        # header: what is being downloaded
+        self.glyph = QLabel()
+        self.title = QLabel("New download")
+        self.title.setObjectName("title")
+        self.sub = QLabel("")
+        self.sub.setObjectName("muted")
+        self.btn_app = btn_app = QPushButton(icons.icon("all", theme.ACCENT, 16), " Open YDM")
+        btn_app.setObjectName("flat")
+        btn_app.setToolTip("Open the full download list")
+        btn_app.clicked.connect(self.main.show_normal)
+        names = QVBoxLayout()
+        names.setSpacing(2)
+        names.addWidget(self.title)
+        names.addWidget(self.sub)
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        head.addWidget(self.glyph, 0, Qt.AlignTop)
+        head.addLayout(names, 1)
+        head.addWidget(btn_app, 0, Qt.AlignTop)
+
+        self.meter = HudBar()
+        self.live = QLabel("")
+        self.live.setFont(theme.number_font(9))
+        self.live.setObjectName("muted")
+
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self._build_setup())
+        self.pages.addWidget(self._build_progress())
+
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 18, 22, 18)
+        lay.setSpacing(12)
+        lay.addLayout(head)
+        lay.addWidget(self.meter)
+        lay.addWidget(self.live)
+        lay.addWidget(self.pages)
+
+        self.timer = QTimer(self, interval=250)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start()
+        self._debounce = QTimer(self, singleShot=True, interval=350)
+        self._debounce.timeout.connect(self._setup_for_url)
+
+        if item_id:                                   # started elsewhere (on-page quality menu)
+            self._to_progress()
+        else:
+            self.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+            self.url_edit.setText(url)
+            video = kind == "video" or (kind is None and looks_like_video_page(url))
+            (self.btn_video if video else self.btn_file).setChecked(True)
+            self._mode_changed()
+            self.url_edit.textChanged.connect(lambda _: self._debounce.start())
+            self.btn_video.toggled.connect(lambda _: self._mode_changed())
+        self._tick()
+
+    # ------------------------------------------------------------------ build
+    def _build_setup(self) -> QWidget:
+        w = QWidget()
+        self.url_edit = QLineEdit()
+        self.url_edit.setPlaceholderText("Paste a link: a file, or a video page (YouTube and 1,800+ sites)")
+        self.url_edit.setClearButtonEnabled(True)
+        self.btn_file = QPushButton(icons.icon("document", theme.TEXT, 16), " File")
+        self.btn_video = QPushButton(icons.icon("video", theme.TEXT, 16), " Video")
+        group = QButtonGroup(self)
+        for b, side in ((self.btn_file, "left"), (self.btn_video, "right")):
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setStyleSheet(_segment_qss(side))
+            group.addButton(b)
+        url_row = QHBoxLayout()
+        url_row.setSpacing(0)
+        url_row.addWidget(self.url_edit, 1)
+        url_row.addSpacing(10)
+        url_row.addWidget(self.btn_file)
+        url_row.addWidget(self.btn_video)
+
+        self.name_edit = QLineEdit(self.payload.get("filename") or "")
+        self.name_edit.setPlaceholderText("Automatic")
+        self.dir_edit = QLineEdit()
+        self.dir_edit.setPlaceholderText(f"{self.settings.download_dir}"
+                                         f"{'  ·  by category' if self.settings.use_category_folders else ''}")
+        browse = QPushButton(icons.icon("folder", theme.TEXT, 16), "")
+        browse.setToolTip("Choose folder")
+        browse.clicked.connect(self._browse)
+        folder_row = QHBoxLayout()
+        folder_row.addWidget(self.dir_edit, 1)
+        folder_row.addWidget(browse)
+
+        self.login_user = QLineEdit()
+        self.login_user.setPlaceholderText("User name")
+        self.login_pass = QLineEdit()
+        self.login_pass.setPlaceholderText("Password")
+        self.login_pass.setEchoMode(QLineEdit.Password)
+        self.login_keep = QCheckBox("Remember")
+        self.login_keep.setToolTip("Save this login for the site (Options → Proxy & logins)")
+        self.login_pass.returnPressed.connect(lambda: self._start(True))
+        login_row = QHBoxLayout()
+        login_row.addWidget(self.login_user, 1)
+        login_row.addWidget(self.login_pass, 1)
+        login_row.addWidget(self.login_keep)
+
+        self.quality = QListWidget()
+        self.quality.setObjectName("choices")
+        self.quality.itemDoubleClicked.connect(lambda _: self._start(True))
+        self.tools_row = QWidget()
+        tr = QHBoxLayout(self.tools_row)
+        tr.setContentsMargins(0, 0, 0, 0)
+        tools_text = QLabel("1080p and up, MP3 and YouTube need FFmpeg and Deno (about 250 MB, once).")
+        tools_text.setObjectName("muted")
+        tools_text.setWordWrap(True)
+        tools_btn = QPushButton(icons.icon("tools", theme.TEXT, 16), " Install")
+        tools_btn.clicked.connect(lambda: self.main.install_video_tools(force=False))
+        tr.addWidget(tools_text, 1)
+        tr.addWidget(tools_btn)
+
+        self.form = QFormLayout()
+        self.form.setHorizontalSpacing(14)
+        self.form.setVerticalSpacing(10)
+        self.form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.form.addRow("Address", url_row)
+        self.form.addRow("Save as", self.name_edit)
+        self.form.addRow("Folder", folder_row)
+        self.form.addRow("Quality", self.quality)
+        self.form.addRow("Login", login_row)
+        self.form.setRowVisible(4, False)
+
+        self.btn_later = QPushButton("Download later")
+        self.btn_start = QPushButton("Start download")
+        self.btn_start.setObjectName("primary")
+        self.btn_start.setDefault(True)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.close)
+        self.btn_later.clicked.connect(lambda: self._start(False))
+        self.btn_start.clicked.connect(lambda: self._start(True))
+        self.btn_login = QPushButton(icons.icon("key", theme.TEXT, 16), " Login")
+        self.btn_login.setObjectName("flat")
+        self.btn_login.setToolTip("For servers that ask for a user name and password")
+        self.btn_login.clicked.connect(lambda: self._show_login(True))
+        buttons = QHBoxLayout()
+        buttons.addWidget(self.btn_login)
+        buttons.addStretch(1)
+        buttons.addWidget(cancel)
+        buttons.addWidget(self.btn_later)
+        buttons.addWidget(self.btn_start)
+
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 4, 0, 0)
+        lay.setSpacing(12)
+        lay.addLayout(self.form)
+        lay.addWidget(self.tools_row)
+        lay.addWidget(_hairline())
+        lay.addLayout(buttons)
+        return w
+
+    def _build_progress(self) -> QWidget:
+        w = QWidget()
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(16)
+        grid.setVerticalSpacing(5)
+        self.facts: dict[str, QLabel] = {}
+        for i, key in enumerate(["Downloaded", "Speed", "Time left", "Connections"]):
+            legend = QLabel(key)
+            legend.setFont(theme.label_font(7))
+            legend.setObjectName("legend")
+            grid.addWidget(legend, 0, i)
+            if key == "Connections":
+                continue
+            val = QLabel("—")
+            val.setFont(theme.number_font(10))
+            grid.addWidget(val, 1, i)
+            self.facts[key] = val
+        self.conn_spin = QSpinBox()
+        self.conn_spin.setRange(1, 32)
+        self.conn_spin.setFont(theme.number_font(10))
+        self.conn_spin.setFixedWidth(70)
+        self.conn_spin.setToolTip("Change it while it downloads: new connections join at once, extra ones "
+                                  "finish their piece and leave")
+        self.conn_spin.valueChanged.connect(self._connections_changed)
+        self.conn_active = QLabel("")
+        self.conn_active.setObjectName("muted")
+        self.conn_active.setFont(theme.number_font(8.5))
+        conn = QHBoxLayout()
+        conn.setSpacing(8)
+        conn.addWidget(self.conn_spin)
+        conn.addWidget(self.conn_active)
+        conn.addStretch(1)
+        grid.addLayout(conn, 1, 3)
+        self.btn_pause = QPushButton(icons.icon("pause", theme.TEXT, 16), " Pause")
+        self.btn_pause.clicked.connect(self._toggle_pause)
+        self.btn_open = QPushButton(icons.icon("open", theme.ON_ACCENT, 16), " Open")
+        self.btn_open.setObjectName("primary")
+        self.btn_open.clicked.connect(self._open_file)
+        self.btn_folder = QPushButton(icons.icon("folder", theme.TEXT, 16), " Open folder")
+        self.btn_folder.clicked.connect(self._open_folder)
+        self.btn_hide = QPushButton("Hide")
+        self.btn_hide.setToolTip("The download keeps going; it stays in YDM's list")
+        self.btn_hide.clicked.connect(self.close)
+        self.btn_fix = QPushButton()
+        self.btn_fix.setObjectName("primary")
+        self.btn_fix.clicked.connect(self._fix)
+        row = QHBoxLayout()
+        row.addWidget(self.btn_pause)
+        row.addWidget(self.btn_fix)
+        row.addStretch(1)
+        row.addWidget(self.btn_folder)
+        row.addWidget(self.btn_hide)
+        row.addWidget(self.btn_open)
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(0, 4, 0, 0)
+        lay.setSpacing(14)
+        lay.addLayout(grid)
+        lay.addWidget(_hairline())
+        lay.addLayout(row)
+        return w
+
+    # ------------------------------------------------------------ setup phase
+    def _video(self) -> bool:
+        return self.btn_video.isChecked()
+
+    def _mode_changed(self):
+        video = self._video()
+        self.form.setRowVisible(1, not video)          # Save as
+        self.form.setRowVisible(3, False)               # Quality appears once the page is read
+        self.tools_row.setVisible(video and bool(tools.missing_for_video()))
+        self.btn_later.setVisible(not video)
+        if video:
+            self.form.setRowVisible(4, False)
+        self.btn_login.setVisible(not video and not self.form.isRowVisible(4))
+        self._setup_for_url()
+
+    def _setup_for_url(self):
+        url = self.url_edit.text().strip()
+        if not url.lower().startswith(("http://", "https://", "ftp://", "ftps://")):
+            urls = find_urls(url)
+            if not urls:
+                self._drop_prestart()
+                self.live.setText("")
+                return
+            url = urls[0]
+        if self._video():
+            self._drop_prestart()
+            self._info = None
+            self.quality.clear()
+            self.form.setRowVisible(3, False)
+            self.live.setText("Reading the video page…")
+            self._run(fetch_video_info, url, self.headers)
+        elif url != self._prestarted_url:
+            self._prestart(url)
+        self.adjustSize()
+
+    def _prestart(self, url: str):
+        """IDM's trick: download first, ask questions while it runs."""
+        self._drop_prestart()
+        item = self.manager.add(url, headers=self.headers, filename=self.payload.get("filename") or "",
+                                pending=True)
+        self.item_id, self._prestarted_url = item.id, url
+
+    def _drop_prestart(self):
+        if self.item_id and self._prestarted_url:
+            item = self.manager.get(self.item_id)
+            if item and item.pending:
+                self.manager.discard(self.item_id)
+        self.item_id, self._prestarted_url = None, ""
+
+    def _run(self, fn, *args):
+        self._ticket += 1
+        job = _Job(self._ticket, fn, *args)
+        job.signals.done.connect(self._on_info)
+        job.signals.failed.connect(self._on_info_failed)
+        self._jobs.append(job)
+        QThreadPool.globalInstance().start(job)
+
+    def _on_info(self, ticket: int, info: dict):
+        if ticket != self._ticket:
+            return
+        self._info = info
+        self.quality.clear()
+        for label, spec, size, convert in info["options"]:
+            it = QListWidgetItem(f"{label:<16}{('≈ ' + human_size(size)) if size else ''}")
+            it.setData(Qt.UserRole, (spec, convert))
+            if convert == "mp3" or label.startswith("Audio"):
+                it.setIcon(icons.icon("music", theme.MUTED, 16))
+            else:
+                it.setIcon(icons.icon("video", theme.MUTED, 16))
+            self.quality.addItem(it)
+        self.quality.setCurrentRow(0)
+        self.quality.setFixedHeight(min(260, 8 + 31 * self.quality.count()))
+        self.form.setRowVisible(3, True)
+        self.title.setText(_elide(self.title, info["title"], 430))
+        by = info.get("uploader") or ""
+        self.sub.setText(by)
+        note = "" if has_ffmpeg() else "Up to 720p until the video tools are installed."
+        self.live.setText(note)
+        self.glyph.setPixmap(icons.pixmap("video", theme.MUTED, 28))
+        self.adjustSize()
+
+    def _on_info_failed(self, ticket: int, message: str):
+        if ticket == self._ticket:
+            self.live.setText(f"Couldn't read this page: {message}")
+
+    def _browse(self):
+        d = QFileDialog.getExistingDirectory(self, "Save to", self.dir_edit.text() or self.settings.download_dir)
+        if d:
+            self.dir_edit.setText(d)
+
+    def _start(self, now: bool):
+        url = self.url_edit.text().strip()
+        if self._video():
+            current = self.quality.currentItem()
+            if not current:
+                self.live.setText("Wait for the quality list, or check the address.")
+                return
+            spec, convert = current.data(Qt.UserRole)
+            item = self.manager.add(url, kind="video", video_format=spec, convert=convert,
+                                    save_dir=self.dir_edit.text().strip(), headers=self.headers,
+                                    title=(self._info or {}).get("title", ""))
+            self.item_id = item.id
+        else:
+            if not self.item_id:
+                self.live.setText("Enter an address that starts with http://, https:// or ftp://")
+                self.url_edit.setFocus()
+                return
+            user = self.login_user.text().strip()
+            if user and self.form.isRowVisible(4):
+                self.manager.set_login(self.item_id, user, self.login_pass.text(), self.login_keep.isChecked())
+            self.manager.confirm(self.item_id, filename=self.name_edit.text().strip(),
+                                 save_dir=self.dir_edit.text().strip(), start=now)
+        self._prestarted_url = ""                    # confirmed: closing no longer cancels it
+        if now and self.settings.progress_window:
+            self._to_progress()
+        else:
+            self.close()
+
+    # --------------------------------------------------------- progress phase
+    def _to_progress(self):
+        self.pages.widget(0).setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)   # don't keep its height
+        self.pages.setCurrentIndex(1)
+        if self.windowFlags() & Qt.WindowStaysOnTopHint:
+            self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
+            self.show()
+        self._tick()
+        self.adjustSize()
+
+    def _show_login(self, focus: bool = False):
+        if not self.form.isRowVisible(4):
+            self.form.setRowVisible(4, True)
+            self.btn_login.hide()
+            self.adjustSize()
+        if focus:
+            self.login_user.setFocus()
+
+    def _connections_changed(self, n: int):
+        item = self.manager.get(self.item_id) if self.item_id else None
+        if item and n != item.connections:
+            self.manager.set_connections(item.id, n)
+
+    def _fix(self):
+        item = self.manager.get(self.item_id) if self.item_id else None
+        if item and item.expired:
+            self.main.renew_address(item.id)
+        elif item and item.needs_login:
+            self.main.login_for(item.id)
+
+    def apply_theme(self):
+        self.btn_app.setIcon(icons.icon("all", theme.ACCENT, 16))
+        self.btn_open.setIcon(icons.icon("open", theme.ON_ACCENT, 16))
+        self.btn_file.setStyleSheet(_segment_qss("left"))
+        self.btn_video.setStyleSheet(_segment_qss("right"))
+        self.setStyleSheet(f"DownloadWindow {{ background: {theme.BG}; }}")
+        self.meter.update()
+
+    def _toggle_pause(self):
+        item = self.manager.get(self.item_id) if self.item_id else None
+        if not item:
+            return
+        if item.status in Status.ACTIVE or item.status == Status.QUEUED:
+            self.manager.pause(item.id)
+        else:
+            self.manager.start(item.id)
+
+    def _open_file(self):
+        item = self.manager.get(self.item_id) if self.item_id else None
+        if item and os.path.exists(item.path):
+            self.manager.mark_seen(item.id)
+            open_path(item.path)
+            self.close()
+
+    def _open_folder(self):
+        item = self.manager.get(self.item_id) if self.item_id else None
+        if not item:
+            return
+        if item.status == Status.COMPLETED and os.path.exists(item.path):
+            reveal_in_folder(item.path)
+        elif item.save_dir and os.path.isdir(item.save_dir):
+            open_path(item.save_dir)
+
+    # ------------------------------------------------------------------ live
+    def _tick(self):
+        item = self.manager.get(self.item_id) if self.item_id else None
+        self.meter.setVisible(item is not None)
+        self.meter.set_item(item)
+        if item is None:
+            return
+        name = item.dest_name or item.filename or item.title or ""
+        if name:
+            self.title.setText(_elide(self.title, name, 430))
+            self.glyph.setPixmap(icons.pixmap(icons.CATEGORY_ICONS.get(
+                "Video" if item.kind == "video" else category_for(name), "other"), theme.MUTED, 28))
+        size = human_size(item.total) if item.total > 0 else ""
+        where = item.dest_dir or item.save_dir
+        self.sub.setText("  ·  ".join(x for x in (size, where) if x))
+        if self.pages.currentIndex() == 0:
+            self._tick_setup(item)
+        else:
+            self._tick_progress(item)
+
+    def _tick_setup(self, item):
+        if item.filename and not self.name_edit.text():
+            self.name_edit.setPlaceholderText(item.filename)
+        if item.needs_login:
+            self._show_login(focus=not self.login_user.text())
+            self.live.setText("This server asks for a login: enter it and press Start.")
+        elif item.status == Status.ERROR:
+            self.live.setText(f"Problem: {item.error}")
+        elif item.status == Status.COMPLETED:
+            self.live.setText(f"Already finished ({human_size(item.total)}). Press Start to keep it.")
+        elif item.downloaded:
+            got = f"{human_size(item.downloaded)} of {human_size(item.total)}" if item.total > 0 \
+                else human_size(item.downloaded)
+            speed = human_speed(item.speed)
+            self.live.setText(f"Already downloading  ·  {got}" + (f"  ·  {speed}" if speed else ""))
+        else:
+            self.live.setText("Connecting…")
+
+    def _tick_progress(self, item):
+        f = self.facts
+        f["Downloaded"].setText(f"{human_size(item.downloaded)}  ({item.progress * 100:.0f}%)"
+                                if item.total > 0 else human_size(item.downloaded))
+        running = item.status == Status.DOWNLOADING
+        f["Speed"].setText((human_speed(item.speed) if running else "") or "—")
+        f["Time left"].setText((human_eta(item.eta) if running else "") or "—")
+        active = sum(1 for s in item.segments if s.active)
+        if not self.conn_spin.hasFocus() and self.conn_spin.value() != item.connections:
+            self.conn_spin.blockSignals(True)
+            self.conn_spin.setValue(min(32, item.connections))
+            self.conn_spin.blockSignals(False)
+        self.conn_spin.setEnabled(not item.status == Status.COMPLETED and (item.resumable or item.kind == "video"
+                                                                           or item.total < 0))
+        self.conn_active.setText(f"{active} working" if running and item.kind == "file" else "")
+        fix = "Renew address" if item.expired and item.kind == "file" else "Log in…" if item.needs_login else ""
+        self.btn_fix.setText(fix)
+        self.btn_fix.setVisible(bool(fix))
+        done = item.status == Status.COMPLETED
+        self.btn_open.setVisible(done)
+        self.btn_pause.setVisible(not done)
+        self.btn_hide.setText("Close" if done else "Hide")
+        if done:
+            self.live.setText("Download complete.")
+            self.live.setStyleSheet(f"color: {theme.INK['Completed']};")
+        elif item.status == Status.ERROR:
+            self.live.setText(f"Stopped: {item.error}")
+            self.live.setStyleSheet(f"color: {theme.INK['Error']};")
+        else:
+            self.live.setText(item.status if item.status != Status.DOWNLOADING else "")
+            self.live.setStyleSheet("")
+        paused = item.status in (Status.PAUSED, Status.ERROR)
+        self.btn_pause.setText(" Resume" if paused else " Pause")
+        self.btn_pause.setIcon(icons.icon("resume" if paused else "pause", theme.TEXT, 16))
+
+    # ------------------------------------------------------------- lifecycle
+    def showEvent(self, event):
+        theme.apply_window_chrome(self)
+        super().showEvent(event)
+
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key_Escape:
+            self.close()
+        else:
+            super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        self.timer.stop()
+        self._drop_prestart()           # closed without confirming: cancel and clean up
+        self.closed.emit(self)
+        super().closeEvent(event)
+
+
+def _elide(label: QLabel, text: str, width: int) -> str:
+    return QFontMetrics(label.font()).elidedText(text, Qt.ElideMiddle, width)
+
+
+def _segment_qss(side: str) -> str:
+    radius = ("border-top-right-radius:0; border-bottom-right-radius:0;" if side == "left"
+              else "border-top-left-radius:0; border-bottom-left-radius:0; margin-left:-1px;")
+    return (f"QPushButton {{ padding: 6px 12px; {radius} }}"
+            f"QPushButton:checked {{ background: {theme.SELECT}; border-color: {theme.ACCENT}; color: {theme.ACCENT}; }}")

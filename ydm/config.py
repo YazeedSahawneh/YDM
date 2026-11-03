@@ -12,9 +12,14 @@ from pathlib import Path
 
 APP_NAME = "YDM"
 APP_TITLE = "YDM — Download Manager"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.3.0"
 DEFAULT_PORT = 9614
-ACCENT = "#3B82F6"          # main accent colour used by the theme and icons
+ACCENT = "#FFB547"          # amber: only on things you can press (buttons, selection)
+SIGNAL = "#3DDBC0"          # meter light: bytes arriving
+
+# In-app updates: "owner/repo" of a public GitHub repo whose releases carry
+# YDM-Setup-<version>.exe. Empty = update checks are off.
+UPDATE_REPO = "YazeedSahawneh/YDM"
 
 
 def app_data_dir() -> Path:
@@ -60,7 +65,7 @@ def is_downloadable_url(url: str) -> bool:
 class Settings:
     download_dir: str = str(default_download_dir())
     use_category_folders: bool = True
-    connections: int = 8
+    connections: int = 16
     max_active: int = 3
     speed_limit_kbps: int = 0           # 0 = unlimited
     port: int = DEFAULT_PORT
@@ -73,6 +78,18 @@ class Settings:
     scheduler_start: str = "02:00"
     scheduler_stop: str = "08:00"
     scheduler_days: list[int] = field(default_factory=lambda: [0, 1, 2, 3, 4, 5, 6])  # Mon=0
+    auto_update: bool = True            # check GitHub daily, download in the background
+    last_update_check: float = 0.0
+    details_visible: bool = True        # bottom pane with the segment map
+    progress_window: bool = True        # small IDM-style window per download
+    proxy_mode: str = "none"            # none | system | http | socks5
+    proxy_host: str = ""
+    proxy_port: int = 8080
+    proxy_user: str = ""
+    proxy_pass: str = ""                # vault.protect()ed
+    accent: str = ACCENT                # theme: pressable things
+    signal: str = SIGNAL                # theme: meters
+    bar_colors: str = "shift"           # progress bar: "shift" (red → green with the %) or "theme"
 
     @classmethod
     def path(cls) -> Path:

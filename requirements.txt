@@ -1,3 +1,4 @@
 PySide6>=6.6
-httpx>=0.27
-yt-dlp>=2024.10.0
+httpx[socks]>=0.27
+pyspnego>=0.10
+yt-dlp[default]>=2025.11.0

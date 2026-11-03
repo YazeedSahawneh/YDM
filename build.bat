@@ -21,9 +21,24 @@ if not exist ".venv\Scripts\python.exe" (
 ".venv\Scripts\python.exe" -m pip install --upgrade pip || goto :fail
 ".venv\Scripts\python.exe" -m pip install -r requirements.txt pyinstaller || goto :fail
 ".venv\Scripts\pyinstaller.exe" --noconfirm --windowed --name YDM --icon assets\ydm.ico ^
-    --collect-submodules yt_dlp main.py || goto :fail
+    --collect-submodules yt_dlp --collect-submodules spnego --hidden-import socksio main.py || goto :fail
 echo.
 echo Done: dist\YDM\YDM.exe
+
+REM ---- installer (needs Inno Setup:  winget install -e --id JRSoftware.InnoSetup) ----
+set "ISCC="
+for %%P in ("%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe" "%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe" "%ProgramFiles%\Inno Setup 6\ISCC.exe") do (
+    if not defined ISCC if exist %%P set "ISCC=%%~P"
+)
+if not defined ISCC (
+    echo Inno Setup not found, so no installer was made.
+    echo Install it with:  winget install -e --id JRSoftware.InnoSetup
+    pause
+    exit /b 0
+)
+for /f %%V in ('.venv\Scripts\python.exe -c "from ydm.config import APP_VERSION; print(APP_VERSION)"') do set "VER=%%V"
+"%ISCC%" /Q /DAppVersion=%VER% installer\YDM.iss || goto :fail
+echo Done: dist\YDM-Setup-%VER%.exe
 pause
 exit /b 0
 
