@@ -193,8 +193,9 @@ class DetailsPane(QFrame):
         fm = QFontMetrics(self.name.font())
         self.name.setText(fm.elidedText(item.filename or item.title or item.url, Qt.ElideMiddle,
                                         max(200, self.width() - 420)))
-        self.status.setText(item.error if item.status == Status.ERROR and item.error else item.status)
-        self.status.setStyleSheet(f"color: {theme.INK.get(item.status, theme.TEXT)}; font-weight: 600;")
+        self.status.setText(item.label)
+        ink = theme.INK.get(Status.ERROR if item.missing else item.status, theme.TEXT)
+        self.status.setStyleSheet(f"color: {ink}; font-weight: 600;")
         done = item.status == Status.COMPLETED
         self.btn_open.setEnabled(done and os.path.exists(item.path))
         f["Address"].setText(QFontMetrics(f["Address"].font()).elidedText(item.url, Qt.ElideMiddle,
@@ -214,6 +215,8 @@ class DetailsPane(QFrame):
                                 else ("Checking…" if item.status in Status.ACTIVE else "—"))
         active = [s for s in item.segments if s.active]
         auto = " (auto)" if item.auto_connections else ""
+        servers = sum(1 for s in item.sources if s["state"] == "ok")
+        auto += f" · {servers} servers" if servers > 1 else ""
         f["Connections"].setText(f"{len(active)} active of {item.connections}{auto}"
                                  if item.status == Status.DOWNLOADING else f"{item.connections}{auto}")
         self._fill_table(item)
@@ -228,6 +231,8 @@ class DetailsPane(QFrame):
         else:
             for i, s in enumerate(item.segments, 1):
                 state = "receiving" if s.active and s.remaining else ("done" if not s.remaining else "waiting")
+                if state == "receiving" and len(item.sources) > 1 and s.source is not None:
+                    state += f" · {s.source.host}"         # which server this connection reads from
                 rows.append((str(i), human_size(s.start), f"{human_size(s.done)} of {human_size(s.end - s.start + 1)}",
                              human_speed(s.speed) if s.active else "", state))
         t = self.table
@@ -244,7 +249,7 @@ class DetailsPane(QFrame):
                 if cell.text() != v:
                     cell.setText(v)
                 if c == 4:
-                    cell.setForeground(live if v == "receiving" else muted)
+                    cell.setForeground(live if v.startswith("receiving") else muted)
 
 
 class Banner(QFrame):

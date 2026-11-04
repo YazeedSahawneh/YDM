@@ -6,8 +6,8 @@ from urllib.parse import urlparse
 from PySide6.QtCore import QObject, QRectF, QRunnable, QSize, QThreadPool, QTime, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog, QFormLayout,
-                               QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
-                               QRadioButton, QSpinBox, QStackedWidget, QTimeEdit, QVBoxLayout, QWidget)
+                               QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
+                               QPushButton, QRadioButton, QSpinBox, QStackedWidget, QTimeEdit, QVBoxLayout, QWidget)
 
 from .. import startup, tools, updater, vault
 from ..config import APP_NAME, APP_VERSION, UPDATE_REPO, Settings
@@ -195,6 +195,62 @@ class LoginDialog(Dialog):
 
 
 # ------------------------------------------------------------- renew address
+class MirrorsDialog(Dialog):
+    """Other addresses of the same file: YDM takes pieces from all of them at once."""
+
+    def __init__(self, item, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Mirrors")
+        self.setMinimumWidth(560)
+        title = QLabel("Download from several servers")
+        title.setObjectName("title")
+        sub = QLabel("Paste other addresses of this same file, one per line (a mirror list, another CDN). "
+                     "Each server has its own connection limit, so together they're faster. YDM checks every "
+                     "one first: same size and the same bytes, or it isn't used.")
+        sub.setObjectName("muted")
+        sub.setWordWrap(True)
+        self.edit = QPlainTextEdit("\n".join(item.mirrors))
+        self.edit.setPlaceholderText("https://mirror.example.org/file.iso")
+        self.edit.setFixedHeight(110)
+        self.status = QListWidget()
+        self.status.setObjectName("choices")
+        state_ink = {"ok": "Completed", "checking": "Queued", "bad": "Error"}
+        for s in item.sources:
+            text = {"ok": "in use", "checking": "checking…", "bad": "not used"}.get(s["state"], s["state"])
+            if s["state"] == "ok" and s.get("limit"):
+                text += f" · takes {s['limit']} connection{'s' * (s['limit'] != 1)}"
+            if s.get("note"):
+                text += f" · {s['note']}"
+            it = QListWidgetItem(f"{s['host']}{'  (original)' if s.get('primary') else ''}  —  {text}")
+            it.setForeground(theme.ink(state_ink.get(s["state"], "Queued")))
+            it.setToolTip(s.get("url", ""))
+            self.status.addItem(it)
+        self.status.setVisible(bool(item.sources))
+        self.status.setFixedHeight(min(150, 8 + 31 * max(1, len(item.sources))))
+        ok = QPushButton("Use these")
+        ok.setObjectName("primary")
+        ok.setDefault(True)
+        ok.clicked.connect(self.accept)
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        row.addWidget(cancel)
+        row.addWidget(ok)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(22, 18, 22, 18)
+        lay.setSpacing(10)
+        lay.addWidget(title)
+        lay.addWidget(sub)
+        lay.addWidget(self.edit)
+        lay.addWidget(self.status)
+        lay.addWidget(_hairline())
+        lay.addLayout(row)
+
+    def urls(self) -> list[str]:
+        return find_urls(self.edit.toPlainText())
+
+
 class RenewDialog(Dialog):
     """The link of an unfinished download stopped working: get a fresh one, keep the progress."""
 

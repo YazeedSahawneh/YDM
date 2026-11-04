@@ -212,6 +212,20 @@ class DownloadManager:
             entry[0].set_connections(item.connections)
         self._dirty = True
 
+    def add_mirrors(self, item_id: str, urls: list[str]) -> None:
+        """Other addresses of the same file. A running download checks them and uses them at once."""
+        item = self._items.get(item_id)
+        if not item:
+            return
+        entry = self._running.get(item_id)
+        if entry and hasattr(entry[0], "add_mirrors"):
+            entry[0].add_mirrors(urls)
+        else:
+            known = set(item.mirrors) | {item.url}
+            new = [u for u in dict.fromkeys(urls) if u.lower().startswith(("http://", "https://")) and u not in known]
+            item.mirrors = (list(item.mirrors) + new)[:8]
+        self._dirty = True
+
     def set_auto_connections(self, item_id: str) -> None:
         """Hand the connection count back to YDM; it takes effect from the next start/resume."""
         item = self._items.get(item_id)
@@ -260,7 +274,7 @@ class DownloadManager:
             except OSError:
                 pass
         item.segments, item.parts, item.total, item.downloaded = [], [], -1, 0
-        item.status = Status.PAUSED
+        item.status, item.missing = Status.PAUSED, False
         self.start(item_id)
 
     def remove(self, item_id: str, delete_file: bool = False) -> None:
@@ -434,11 +448,27 @@ class DownloadManager:
             except Exception:  # noqa: BLE001
                 pass
 
+    def check_files(self) -> list[DownloadItem]:
+        """Finished downloads whose file was deleted or moved since. Returns the newly missing ones."""
+        gone = []
+        for item in self.items():
+            if item.status != Status.COMPLETED or not item.path:
+                item.missing = False
+                continue
+            was, item.missing = item.missing, not os.path.exists(item.path)
+            if item.missing and not was:
+                gone.append(item)
+        return gone
+
     def _tick_loop(self) -> None:
-        last_save = time.monotonic()
+        last_save = last_check = time.monotonic()
         was_busy = False
+        self.check_files()
         while not self._closing:
             time.sleep(0.5)
+            if time.monotonic() - last_check > 4:
+                last_check = time.monotonic()
+                self.check_files()
             self._update_speeds()
             self._scheduler_tick()
             self._fill_slots()

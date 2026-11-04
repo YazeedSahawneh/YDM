@@ -6,9 +6,11 @@ from ydm.config import Settings
 from ydm.engine import DownloadManager, Status
 
 DATA = os.urandom(24 * 1024 * 1024 + 12345)
+OTHER = os.urandom(len(DATA))
 SHA = hashlib.sha256(DATA).hexdigest()
 
 ACTIVE = [0]; ACTIVE_LOCK = threading.Lock(); MAX_SEEN = [0]; LIMIT3 = [0]
+GROUPS, GMAX, GBYTES, DEAD = {}, {}, {}, [False]       # mirror tests
 
 VALID = ["A"]          # /exp/<token>: only the current token works (an expiring link)
 
@@ -56,6 +58,9 @@ class H(BaseHTTPRequestHandler):
         if "secret-digest" in self.path and not (got.startswith("Digest ") and _digest_ok(got, "GET", self.path)):
             return self._refuse(401, [("WWW-Authenticate", 'Digest realm="ydm", qop="auth", nonce="n0nce42", '
                                                           'algorithm=MD5')])
+        g = re.search(r"/grp-(\w+)/", self.path)
+        if g:
+            return self._serve_group(g.group(1))
         if "percap" in self.path or "totalcap" in self.path:
             return self._serve_capped()
         if "limit3" in self.path:            # 3 parallel connections; extras get a 403 or are cut off
@@ -80,6 +85,41 @@ class H(BaseHTTPRequestHandler):
             finally:
                 with ACTIVE_LOCK: ACTIVE[0] -= 1
         self._serve()
+    def _serve_group(self, g):
+        """Mirror tests: each group is its own server allowing 2 connections (429 beyond).
+        other = same size, different bytes; short = a different size; D = 403 once DEAD;
+        M = announces mirror B in a Metalink Link header."""
+        if g == "D" and DEAD[0]:
+            return self._refuse(403)
+        with ACTIVE_LOCK:
+            if GROUPS.get(g, 0) >= 2:
+                return self._refuse(429)
+            GROUPS[g] = GROUPS.get(g, 0) + 1
+            GMAX[g] = max(GMAX.get(g, 0), GROUPS[g])
+        try:
+            data = OTHER if g == "other" else DATA[:-1000] if g == "short" else DATA
+            a, b = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", "bytes=0-")).groups()
+            a = int(a); b = int(b) if b else len(data) - 1
+            self.send_response(206)
+            self.send_header("Content-Range", f"bytes {a}-{b}/{len(data)}")
+            self.send_header("Content-Length", str(b - a + 1))
+            if g == "M":
+                self.send_header("Link", f'<http://localhost:{srv.server_port}/grp-B/f.bin>; rel=duplicate; pri=1, '
+                                         f'<http://127.0.0.1:{srv.server_port}/x.css>; rel=stylesheet')
+            self.end_headers()
+            for i in range(a, b + 1, 256 * 1024):
+                piece = data[i:min(i + 256 * 1024, b + 1)]
+                try:
+                    self.wfile.write(piece)
+                except OSError:
+                    return
+                with ACTIVE_LOCK:
+                    GBYTES[g] = GBYTES.get(g, 0) + len(piece)
+                time.sleep(0.03)
+        finally:
+            with ACTIVE_LOCK:
+                GROUPS[g] -= 1
+
     def _serve_capped(self):
         """percap: each connection gets 256 KB/s. totalcap: all connections share 3 MB/s."""
         a, b = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", "bytes=0-")).groups()
@@ -312,6 +352,50 @@ for how in ("403", "cut"):
 HOSTS._data.clear()
 print("OK servers that refuse extra connections (403 / hang up)")
 
+# 6e. mirrors: several servers with the same file, each with its own limit
+HOSTS._data.clear()
+lh = base.replace("127.0.0.1", "localhost")          # another host name = another server to YDM
+mi = m2.add(base + "/grp-A/f.bin", connections=8, start=False)
+m2.add_mirrors(mi.id, [lh + "/grp-B/f.bin", lh + "/grp-other/f.bin", lh + "/grp-short/f.bin", "ftp://x/y"])
+assert len(mi.mirrors) == 3, mi.mirrors              # ftp isn't a mirror; duplicates are dropped
+m2.add_mirrors(mi.id, [lh + "/grp-B/f.bin"]); assert len(mi.mirrors) == 3
+m2.start(mi.id)
+wait(mi, {Status.COMPLETED, Status.ERROR}, 120)
+assert mi.status == Status.COMPLETED, mi.error
+check(mi)
+src = {s["url"].split("/grp-")[1].split("/")[0]: s for s in mi.sources}
+assert src["B"]["state"] == "ok" and GBYTES.get("B", 0) > 2 * 1024 * 1024, (src["B"], GBYTES)
+assert GMAX["A"] <= 2 and GMAX["B"] <= 2, GMAX                 # each server's own limit held
+assert src["other"]["state"] == "bad" and "don't match" in src["other"]["note"], src["other"]
+assert src["short"]["state"] == "bad" and "different file" in src["short"]["note"], src["short"]
+assert GBYTES.get("other", 0) <= 64 * 1024 and GBYTES.get("short", 0) <= 64 * 1024   # only the check sample
+assert HOSTS.limit("localhost") == 2 and HOSTS.limit("127.0.0.1") == 2, HOSTS._data
+print(f"mirrors: A {GBYTES['A'] // 2**20} MB + B {GBYTES['B'] // 2**20} MB, 2 connections each; "
+      f"other: {src['other']['note']}; short: {src['short']['note']}")
+
+# the original link dies halfway: the mirror finishes the file
+HOSTS._data.clear(); GBYTES.clear()
+md = m2.add(base + "/grp-D/f.bin", connections=4, start=False)
+m2.add_mirrors(md.id, [lh + "/grp-E/f.bin"]); m2.start(md.id)
+end = time.time() + 60
+while time.time() < end and not (md.downloaded > 6 * 2**20 and GBYTES.get("E", 0) > 0): time.sleep(0.05)
+DEAD[0] = True
+wait(md, {Status.COMPLETED, Status.ERROR}, 120); DEAD[0] = False
+assert md.status == Status.COMPLETED, md.error
+check(md)
+print(f"original died at {GBYTES.get('D', 0) // 2**20} MB: the mirror sent {GBYTES['E'] // 2**20} MB, file intact")
+
+# a server that announces its mirrors itself (Metalink/HTTP Link: rel=duplicate)
+HOSTS._data.clear(); GBYTES.clear()
+mm = m2.add(base + "/grp-M/f.bin", connections=6)
+wait(mm, {Status.COMPLETED, Status.ERROR}, 120)
+assert mm.status == Status.COMPLETED, mm.error
+check(mm)
+assert mm.mirrors == [lh + "/grp-B/f.bin"], mm.mirrors        # the stylesheet link isn't a mirror
+assert GBYTES.get("B", 0) > 2 * 1024 * 1024, GBYTES
+HOSTS._data.clear()
+print("OK mirrors (limits add up, wrong files refused, a dead link covered, Metalink found)")
+
 # 6b. automatic connection count
 from ydm.engine.http_downloader import AUTO_START, _Tuner
 t = _Tuner(6, 32)
@@ -419,6 +503,19 @@ if startup.supported():
             except OSError:
                 pass
     print("OK start with Windows (on/off shared with Task Manager)")
+
+# 6f. a finished file deleted from its folder: the list says so, and it can be fetched again
+from ydm.engine.item import MISSING
+assert mm.status == Status.COMPLETED and not mm.missing and m2.check_files() == []
+os.remove(mm.path)
+assert m2.check_files() == [mm] and mm.missing and mm.label == MISSING
+assert m2.check_files() == []                      # reported once, still marked
+assert "missing" not in mm.to_dict()               # worked out at each start, not saved
+m2.restart(mm.id)
+assert not mm.missing
+wait(mm, {Status.COMPLETED, Status.ERROR}, 120); assert mm.status == Status.COMPLETED, mm.error
+check(mm); assert m2.check_files() == [] and mm.label == Status.COMPLETED
+print("OK deleted file noticed (File missing) and downloaded again")
 
 # 7. bad url
 e = m2.add(base.replace(str(srv.server_port), "1") + "/x")

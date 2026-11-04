@@ -48,6 +48,7 @@ class _Stream:
 
 
 class FtpDownloader(HttpDownloader):
+    supports_mirrors = False
     def __init__(self, item, limiter, resolve_dir, hosts=None):
         super().__init__(item, limiter, resolve_dir, hosts)
         parts = urlsplit(auth.split_userinfo(item.url)[0])

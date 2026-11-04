@@ -20,7 +20,13 @@ How it works (the same idea IDM uses, plus a few tricks):
   6. The connection count can change while it runs (set_connections): extra
      workers join by splitting the biggest pieces, surplus ones finish their
      current chunk and leave their piece to the others.
-  7. In auto mode YDM picks the count itself (_Tuner): it starts where this
+  7. Mirrors: other addresses of the same file (typed in, or announced by the
+     server with Metalink `Link: <…>; rel=duplicate` headers). Each is checked
+     first: same size, and the same bytes as a piece already downloaded. Then
+     every new connection goes to the server with the most room for it (each
+     server keeps its own connection limit, so the limits add up), weighted by
+     how fast each one is. If one server's link dies, the others finish the file.
+  8. In auto mode YDM picks the count itself (_Tuner): it starts where this
      server was fastest last time, adds connections while each step still buys
      at least 10 % more speed, and settles on the best count once it stops
      paying (your line is full, or the server caps the total). It tries one
@@ -29,6 +35,7 @@ How it works (the same idea IDM uses, plus a few tricks):
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import threading
 import time
@@ -50,6 +57,8 @@ STEAL_MIN = 256 * 1024           # near the end, idle connections still split pi
 MAX_RETRIES = 6
 SLOW_RATIO = 0.3                 # a connection below 30% of the median speed…
 SLOW_TICKS = 4                   # …for this many seconds gets reconnected
+SAMPLE = 64 * 1024               # bytes compared to accept a mirror as the same file
+MAX_MIRRORS = 8
 AUTO_START = 6                   # auto mode, first visit to a server
 AUTO_MAX = 32
 DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -63,6 +72,10 @@ class Cancelled(Exception):
 class _Throttled(Exception):
     """The server refused one more connection (HTTP 429/503)."""
 
+    def __init__(self, code: int = 0, source: "_Source | None" = None):
+        super().__init__(code)
+        self.source = source
+
 
 class _Retire(Exception):
     """This worker should stop; the others carry on with its segment."""
@@ -74,6 +87,30 @@ class _Surplus(_Retire):
 
 class Fatal(RuntimeError):
     """Retrying won't help (link expired, login refused, file changed)."""
+
+
+class _SourceGone(Exception):
+    """That server stopped serving the file; another one carries on (no wait, no retry count)."""
+
+
+class _Source:
+    """One server that has the file: the original address, or a mirror."""
+
+    def __init__(self, url: str, primary: bool = False, limit: int = 0):
+        self.url = url
+        self.host = urlparse(url).hostname or ""
+        self.primary = primary
+        self.state = "ok" if primary else "checking"     # checking | ok | bad
+        self.note = ""
+        self.open = 0            # connections receiving from it right now
+        self.limit = limit       # most it accepted before refusing (0 = no limit seen)
+        self.speed = 0.0         # bytes/s per connection lately
+        self.fails = 0           # connection failures in a row
+        self.cool_until = 0.0    # busy or failing: leave it alone until then
+
+    def info(self) -> dict:
+        return {"host": self.host, "url": self.url, "state": self.state, "note": self.note, "open": self.open,
+                "limit": self.limit, "speed": self.speed, "primary": self.primary}
 
 
 class _Tuner:
@@ -120,6 +157,8 @@ class _Tuner:
 
 
 class HttpDownloader:
+    supports_mirrors = True
+
     def __init__(self, item: DownloadItem, limiter: RateLimiter,
                  resolve_dir: Callable[[DownloadItem], str], hosts: HostMemory | None = None):
         self.item = item
@@ -140,10 +179,14 @@ class HttpDownloader:
         self._leaving = 0                             # workers told to leave that haven't yet
         self._joined = False                          # all workers finished: no more can join
         self._tuner: _Tuner | None = None             # auto connection count
+        self.sources: list[_Source] = []              # [0] = the address itself, then verified mirrors
+        self._mirror_client: httpx.Client | None = None
         headers = {"User-Agent": DEFAULT_UA, "Accept-Encoding": "identity"}
         headers.update({k: v for k, v in item.headers.items() if v})
         creds = auth.credentials_for(item)
-        self.url = auth.split_userinfo(item.url)[0]   # becomes the final address after redirects
+        self.sources = [_Source(auth.split_userinfo(item.url)[0], primary=True,
+                                limit=self.hosts.limit(self.host) or 0)]
+        self._base_headers = {"User-Agent": headers["User-Agent"], "Accept-Encoding": "identity"}
         self.client = net.client(
             headers=headers,
             auth=auth.AutoAuth(*creds) if creds else None,
@@ -151,9 +194,28 @@ class HttpDownloader:
             limits=httpx.Limits(max_connections=64, max_keepalive_connections=32),
         )
 
+    @property
+    def url(self) -> str:
+        """The original address (becomes the final one after redirects)."""
+        return self.sources[0].url
+
+    @url.setter
+    def url(self, value: str) -> None:
+        self.sources[0].url = value
+
     # ------------------------------------------------------------------ API
     def stop(self) -> None:
         self._stop.set()
+
+    def add_mirrors(self, urls: list[str]) -> None:
+        """More addresses of the same file; while it runs they're checked and join at once."""
+        known = {s.url for s in self.sources} | set(self.item.mirrors) | {self.item.url}
+        new = [u for u in urls if u.lower().startswith(("http://", "https://")) and u not in known]
+        self.item.mirrors = (list(self.item.mirrors) + new)[:MAX_MIRRORS]
+        with self._lock:
+            running = bool(self._threads) and not self._joined
+        if running:
+            self._start_mirrors()
 
     def set_connections(self, n: int) -> None:
         """The user changed the count: that wins over auto mode."""
@@ -207,6 +269,9 @@ class HttpDownloader:
                 self._first.close()
                 self._first = None
             self.client.close()
+            if self._mirror_client is not None:
+                self._mirror_client.close()
+            item.sources = [s.info() for s in self.sources] if len(self.sources) > 1 else []
 
     # ---------------------------------------------------------------- probe
     def _probe(self) -> None:
@@ -229,6 +294,9 @@ class HttpDownloader:
             raise
         self._first = r
         self.url = str(r.url)          # every connection goes straight there, no redirect hop each time
+        found = _metalink_mirrors([*r.history, r])
+        if found:
+            self.add_mirrors(found)
         self._layout(name, total, resumable)
 
     def _layout(self, name: str, total: int, resumable: bool) -> None:
@@ -290,6 +358,7 @@ class HttpDownloader:
         finished = threading.Event()
         watcher = threading.Thread(target=self._watch, args=(finished,), daemon=True)
         watcher.start()
+        self._start_mirrors()
         while True:                    # set_connections may add workers while we wait
             with self._lock:
                 running = [t for t in self._threads if t.is_alive()]
@@ -299,10 +368,88 @@ class HttpDownloader:
             running[0].join()
         finished.set()
         watcher.join()
-        if self._accepted and not isinstance(self._error, Fatal):   # an expired link isn't a limit
-            self.hosts.note_limit(self.host, self._accepted)
-        elif self._tuner is not None and self._tuner.settled:
+        if not isinstance(self._error, Fatal):                  # an expired link isn't a limit
+            for src in self.sources:
+                if src.limit and src.state != "bad":
+                    self.hosts.note_limit(src.host, src.limit)
+        if not self._accepted and self._tuner is not None and self._tuner.settled and len(self.sources) == 1:
             self.hosts.note_best(self.host, self._tuner.best_n)
+
+    # -------------------------------------------------------------- mirrors
+    def _start_mirrors(self) -> None:
+        if not self.supports_mirrors or not self.item.resumable:
+            return
+        with self._lock:
+            known = {s.url for s in self.sources}
+            new = [_Source(u, limit=self.hosts.limit(urlparse(u).hostname or "") or 0)
+                   for u in self.item.mirrors if u not in known]
+            self.sources = self.sources + new
+        for src in new:
+            threading.Thread(target=self._check_mirror, args=(src,), daemon=True).start()
+
+    def _mirror_http(self) -> httpx.Client:
+        """Mirrors are other sites: they never get this download's cookies or login."""
+        with self._lock:
+            if self._mirror_client is None:
+                self._mirror_client = net.client(headers=dict(self._base_headers),
+                                                 timeout=httpx.Timeout(30.0, read=60.0),
+                                                 limits=httpx.Limits(max_connections=64,
+                                                                     max_keepalive_connections=32))
+            return self._mirror_client
+
+    def _sample(self) -> tuple[int, bytes] | None:
+        """SAMPLE bytes this download already has on disk, to compare a mirror against."""
+        end = time.monotonic() + 60
+        while not self._stop.is_set() and time.monotonic() < end:
+            with self._lock:
+                seg = next((s for s in self.item.segments if s.done >= SAMPLE), None)
+            if seg is not None:
+                with open(self.item.part_path, "rb") as fh:
+                    fh.seek(seg.start)
+                    return seg.start, fh.read(SAMPLE)
+            self._stop.wait(0.25)
+        return None
+
+    def _check_mirror(self, src: _Source) -> None:
+        """Same size and same bytes, or it isn't the same file."""
+        def bad(note: str):
+            src.state, src.note = "bad", note
+        try:
+            sample = self._sample()
+            if sample is None:
+                return bad("" if self._stop.is_set() else "nothing to compare with yet")
+            start, data = sample
+            r = self._mirror_http().get(src.url, headers={"Range": f"bytes={start}-{start + len(data) - 1}"})
+            if r.status_code != 206:
+                return bad(f"can't send pieces (HTTP {r.status_code})")
+            size = r.headers.get("content-range", "").rsplit("/", 1)[-1]
+            if not size.isdigit() or int(size) != self.item.total:
+                return bad(f"a different file ({int(size):,} bytes)" if size.isdigit() else "size unknown")
+            if r.content != data:
+                return bad("a different file (the bytes don't match)")
+            src.url = str(r.url)
+            src.state = "ok"
+        except httpx.HTTPError as exc:
+            return bad(_friendly_error(exc))
+        with self._lock:
+            grow = not self._joined and not self._stop.is_set()
+            n = self._target + (AUTO_START if self.item.auto_connections else 0)
+        if grow:
+            self._resize(min(AUTO_MAX if self.item.auto_connections else 64, max(n, self._target)))
+
+    def _pick_source(self) -> _Source | None:
+        """The server with the most room for one more connection, favouring the fast ones."""
+        with self._lock:
+            now = time.monotonic()
+            usable = [s for s in self.sources if s.state == "ok" and (not s.limit or s.open < s.limit)
+                      and s.cool_until <= now]
+            if not usable:
+                return None
+            top = max((s.speed for s in usable), default=0.0) or 1.0
+            return min(usable, key=lambda s: ((s.open + 1) / (s.speed or top), not s.primary))
+
+    def _other_good(self, src: _Source) -> bool:
+        return any(s is not src and s.state == "ok" for s in self.sources)
 
     def _next_segment(self) -> Segment | None:
         with self._lock:
@@ -366,37 +513,63 @@ class HttpDownloader:
                 self._first = None
         if first is not None:
             return first
-        req = self.client.build_request("GET", self.url, headers={"Range": f"bytes={seg.pos}-{seg.end}"})
-        r = self.client.send(req, stream=True)
+        src = self._pick_source()
+        if src is None:
+            raise _Throttled(0)             # every server is at its limit
+        client = self.client if src.primary else self._mirror_http()
+        req = client.build_request("GET", src.url, headers={"Range": f"bytes={seg.pos}-{seg.end}"})
+        try:
+            r = client.send(req, stream=True)
+        except httpx.HTTPError as exc:
+            exc.ydm_source = src             # so the caller knows which server failed
+            raise
+        r.ydm_source = src
         if r.history and r.history[-1].status_code != 401:
-            self.url = str(r.url)          # resumed download: learn the final address once
+            src.url = str(r.url)            # resumed download: learn the final address once
         if r.status_code != 206:
             code = r.status_code
             r.close()
             if code in (429, 503):
-                raise _Throttled(code)
+                raise _Throttled(code, src)
+            if code in (403, 421, 509) and (src.open > 0 or src.limit):
+                # its other connections still work, or it has refused extras like this before:
+                # a connection limit (a closed connection can count a moment longer), not the link
+                raise _Throttled(code, src)
             if code == 401:
+                self._drop(src, "asks for a login")
                 raise Fatal(f"{LOGIN_NEEDED}: the server refused the login")
-            if code in (403, 421, 509) and self._open > 0:
-                raise _Throttled(code)      # the others still download: it's a connection limit, not the link
             if code in (403, 404, 410) or (code == 200 and self.item.downloaded):
+                self._drop(src, f"link stopped working (HTTP {code})")
                 raise Fatal(f"{EXPIRED}: renew the address to continue (HTTP {code})")
+            self._drop(src, f"stopped sending pieces (HTTP {code})")
             raise RuntimeError(f"Server stopped honouring ranges (HTTP {code})")
         cr = r.headers.get("content-range", "")
         size = cr.rsplit("/", 1)[-1]
         if size.isdigit() and self.item.total > 0 and int(size) != self.item.total:
             r.close()
+            self._drop(src, f"now serves a different file ({int(size):,} bytes)")
             raise Fatal(f"{EXPIRED}: this address now serves a different file "
                         f"({int(size):,} bytes, expected {self.item.total:,})")
         return r
+
+    def _drop(self, src: _Source, note: str) -> None:
+        """This server can't go on. With another good one, carry on there instead of failing."""
+        with self._lock:
+            if not self._other_good(src):
+                return                       # the caller's error stands
+            src.state, src.note = "bad", note
+        raise _SourceGone(note)
 
     def _download_segment(self, seg: Segment, fh) -> None:
         attempts = 0
         while not self._stop.is_set() and seg.remaining > 0:
             try:
                 r = self._open_range(seg)
+                src = getattr(r, "ydm_source", None) or self.sources[0]
                 with self._lock:
                     self._open += 1
+                    src.open += 1
+                    seg.source = src
                 try:
                     # raw bytes: we asked for identity encoding, so skip httpx's decoder layer
                     chunks = r.iter_raw(CHUNK) if not r.headers.get("content-encoding") else r.iter_bytes(CHUNK)
@@ -414,7 +587,7 @@ class HttpDownloader:
                             self.item.downloaded += len(chunk)
                         fh.seek(pos)
                         fh.write(chunk)
-                        attempts = 0
+                        attempts = src.fails = 0
                         self.limiter.consume(len(chunk), self._stop)
                         if seg.remaining <= 0:
                             break
@@ -423,18 +596,36 @@ class HttpDownloader:
                             break               # close this slow connection and open a fresh one
                         if self._alive - self._leaving > self._target and self._surplus():
                             raise _Surplus
+                except (httpx.HTTPError, OSError) as exc:
+                    exc.ydm_source = src
+                    raise
                 finally:
                     r.close()
                     with self._lock:
                         self._open -= 1
-            except _Throttled:
+                        src.open -= 1
+                        seg.source = None
+            except _SourceGone:
+                continue                        # straight on with another server
+            except _Throttled as t:
                 with self._lock:
+                    if t.source is not None and t.source.open > 0:
+                        # that server's limit: the ones it's serving now (never lower it on one refusal:
+                        # a connection we just closed may still count on its side for a moment)
+                        t.source.limit = max(t.source.limit, t.source.open)
+                    elif t.source is not None and len(self.sources) > 1:
+                        t.source.cool_until = time.monotonic() + 10     # busy right now: try the others
                     working, others = self._open, self._alive - 1
+                other = self._pick_source() if t.source is not None else None
+                if other is not None and other is not t.source:
+                    continue                    # another server has room for this connection
                 if others > 0:
                     with self._lock:
                         self._accepted = max(self._accepted, working)
                     raise _Retire
                 attempts += 1
+                if t.args[0] == 403 and attempts > 2:
+                    raise Fatal(f"{EXPIRED}: renew the address to continue (HTTP 403)")
                 if attempts > MAX_RETRIES:
                     raise RuntimeError("Server is busy (too many requests)")
                 self._stop.wait(min(2 ** attempts, 30))
@@ -442,13 +633,25 @@ class HttpDownloader:
                 raise
             except (httpx.HTTPError, OSError, RuntimeError) as exc:
                 attempts += 1
+                src = getattr(exc, "ydm_source", None)
+                many = len(self.sources) > 1
                 with self._lock:
                     receiving = self._open
+                    if many and src is not None:     # a mirror (or the original) acting up: rest it a while
+                        src.fails += 1
+                        src.cool_until = time.monotonic() + min(5 * 2 ** src.fails, 60)
+                        if src.fails >= 4 and self._other_good(src):
+                            src.state, src.note = "bad", f"keeps failing ({_friendly_error(exc)})"
+                if many and attempts < MAX_RETRIES and self._pick_source() is not None:
+                    continue                         # another server takes this piece
                 if attempts >= 2 and receiving > 0:
                     # this connection keeps failing while the others download: the server allows only
                     # that many (some cut extra connections instead of saying so). Leave the piece to them.
                     with self._lock:
                         self._accepted = max(self._accepted, receiving)
+                        target = src if src is not None else (None if many else self.sources[0])
+                        if target is not None and target.open > 0 and not target.limit:
+                            target.limit = target.open
                     raise _Retire from exc
                 if attempts > MAX_RETRIES:
                     raise exc
@@ -479,6 +682,13 @@ class HttpDownloader:
                     got = s.done - prev.get(id(s), s.done)
                     s.speed = got if s.speed == 0 else s.speed * 0.5 + got * 0.5
                 prev = {id(s): s.done for s in segs}
+                if len(self.sources) > 1:          # per-connection speed of every server, for _pick_source
+                    for src in self.sources:
+                        mine = [s.speed for s in active if s.source is src]
+                        if mine:
+                            src.speed = src.speed * 0.5 + (sum(mine) / len(mine)) * 0.5 if src.speed else \
+                                sum(mine) / len(mine)
+                    self.item.sources = [src.info() for src in self.sources]
                 best = max([best * 0.97] + [s.speed for s in active])
                 if not active:
                     continue
@@ -566,6 +776,17 @@ class HttpDownloader:
         item.downloaded = item.total = size
         item.status = Status.COMPLETED
         item.finished = time.time()
+
+
+def _metalink_mirrors(responses) -> list[str]:
+    """Metalink/HTTP (RFC 6249): mirror servers announce copies as `Link: <url>; rel=duplicate`."""
+    found = []
+    for r in responses:
+        for value in r.headers.get_list("link"):
+            for url, params in re.findall(r"<([^>]+)>\s*((?:;[^,<]*)*)", value):
+                if re.search(r"rel\s*=\s*\"?duplicate", params, re.I) and url.lower().startswith(("http://", "https://")):
+                    found.append(url)
+    return list(dict.fromkeys(found))[:MAX_MIRRORS]
 
 
 def _preallocate(path: str, total: int) -> None:

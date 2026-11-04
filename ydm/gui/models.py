@@ -111,12 +111,12 @@ class DownloadsModel(QAbstractTableModel):
             if col == COL_ETA:
                 return human_eta(item.eta) if item.status == Status.DOWNLOADING else ""
             if col == COL_STATUS:
-                return item.error if item.status == Status.ERROR and item.error else item.status
+                return item.label
             if col == COL_ADDED:
                 return time.strftime("%d %b  %H:%M", time.localtime(item.added))
         if role == Qt.ForegroundRole:
             if col == COL_STATUS:
-                return theme.ink(item.status)
+                return theme.ink(Status.ERROR if item.missing else item.status)
             if col in (COL_SIZE, COL_ADDED, COL_ETA):
                 return QColor(theme.MUTED)
         if role == Qt.FontRole:

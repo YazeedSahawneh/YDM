@@ -20,7 +20,8 @@ from ..config import APP_NAME, APP_TITLE, APP_VERSION, CATEGORY_NAMES, UPDATE_RE
 from ..engine import DownloadManager, Status, gallery
 from ..utils import human_speed, open_path, reveal_in_folder
 from . import hudbar, icons, theme
-from .dialogs import BatchDialog, CountdownDialog, LoginDialog, RenewDialog, SettingsDialog, find_urls
+from .dialogs import (BatchDialog, CountdownDialog, LoginDialog, MirrorsDialog, RenewDialog, SettingsDialog,
+                      find_urls)
 from .download_window import DownloadWindow
 from .models import (COL_ADDED, COL_ETA, COL_NAME, COL_PROGRESS, COL_SIZE, COL_SPEED, COL_STATUS, FILTERS,
                      DownloadsModel, MeterDelegate, NameDelegate)
@@ -542,6 +543,38 @@ class MainWindow(QMainWindow):
         self.manager.renew_wait = None
         self.banner.hide()
 
+    def file_missing(self, item_id: str):
+        """A finished download's file is gone: say so, offer to fetch it again."""
+        item = self.manager.get(item_id)
+        if not item:
+            return
+        item.missing = True
+        self.refresh()
+
+        def again():
+            self.banner.hide()
+            self.manager.restart(item_id)
+            if self.settings.progress_window:
+                self.open_download_window(item_id=item_id)
+            self.refresh()
+
+        def forget():
+            self.banner.hide()
+            self.manager.remove(item_id)
+            self.refresh()
+        self.banner.show_message(f"{item.filename} isn't in {item.save_dir} any more: it was deleted or moved.",
+                                 "folder", [("Remove from list", forget, False), ("Dismiss", self.banner.hide, False),
+                                            ("Download again", again, True)])
+
+    def mirrors_for(self, item_id: str):
+        item = self.manager.get(item_id)
+        if not item:
+            return
+        dlg = MirrorsDialog(item, self)
+        if dlg.exec():
+            self.manager.add_mirrors(item_id, dlg.urls())
+            self.refresh()
+
     def login_for(self, item_id: str):
         from urllib.parse import urlsplit
         item = self.manager.get(item_id)
@@ -635,7 +668,9 @@ class MainWindow(QMainWindow):
 
     def _open_item(self, index):
         item = self.model.item_at(index.row())
-        if item and item.status == Status.COMPLETED and os.path.exists(item.path):
+        if item and item.status == Status.COMPLETED and not os.path.exists(item.path):
+            self.file_missing(item.id)
+        elif item and item.status == Status.COMPLETED:
             open_path(item.path)
         elif item and item.expired and item.kind == "file":
             self.renew_address(item.id)
@@ -663,6 +698,9 @@ class MainWindow(QMainWindow):
             if item.kind == "file":
                 m.addAction(icons.icon("link"), "Renew download address…", lambda: self.renew_address(item.id))
             m.addAction(icons.icon("key"), "Login…", lambda: self.login_for(item.id))
+            if item.kind == "file" and not item.url.lower().startswith(("ftp://", "ftps://")):
+                m.addAction(icons.icon("plugs"), f"Mirrors{f' ({len(item.mirrors)})' if item.mirrors else ''}…",
+                            lambda: self.mirrors_for(item.id))
             conn = m.addMenu(icons.icon("plugs"), f"Connections ({'auto, ' if item.auto_connections else ''}"
                                                   f"{item.connections})")
             a = conn.addAction("Automatic", lambda: self._for_selected(self.manager.set_auto_connections))

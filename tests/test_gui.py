@@ -100,6 +100,18 @@ sd.auto_conn.setChecked(False); assert sd.conn.isEnabled()
 assert sd.updated_settings().auto_connections is False
 sd.auto_conn.setChecked(True); assert sd.updated_settings().auto_connections is True
 assert sd.startup_box.isChecked() == sd._startup_was; sd.close()
+# mirrors dialog: lists every server's state, takes new addresses
+from ydm.gui.dialogs import MirrorsDialog
+from ydm.engine import DownloadItem
+mit = DownloadItem(url="https://a.example/f.iso", mirrors=["https://b.example/f.iso"])
+mit.sources = [{"host": "a.example", "url": "https://a.example/f.iso", "state": "ok", "note": "", "limit": 2,
+                "primary": True},
+               {"host": "b.example", "url": "https://b.example/f.iso", "state": "bad",
+                "note": "a different file (the bytes don't match)", "limit": 0}]
+md = MirrorsDialog(mit, w); md.show(); pump(0.2); md.grab().save(f"{out}/mirrors.png")
+assert md.status.count() == 2 and "takes 2 connections" in md.status.item(0).text()
+md.edit.setPlainText("https://b.example/f.iso\nhttps://c.example/f.iso  junk"); assert md.urls() == [
+    "https://b.example/f.iso", "https://c.example/f.iso"]; md.close()
 # a post with photos: "All N photos" in the quality list hands off to save_post
 from ydm.engine import gallery
 gd = w.open_download_window(kind="video"); pump(0.1)

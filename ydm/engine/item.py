@@ -19,6 +19,7 @@ class Status:
 
 EXPIRED = "Link expired"              # error prefixes the GUI keys off
 LOGIN_NEEDED = "Login required"
+MISSING = "File missing (deleted or moved)"
 
 
 @dataclass
@@ -28,6 +29,7 @@ class Segment:
     done: int = 0
     active: bool = field(default=False, compare=False)   # runtime only
     speed: float = field(default=0.0, compare=False)     # runtime only, bytes/s of its connection
+    source: object = field(default=None, compare=False, repr=False)   # runtime only: the server it reads from
 
     @property
     def pos(self) -> int:
@@ -70,12 +72,15 @@ class DownloadItem:
     parts: list = field(default_factory=list)   # video: per-stream progress, so a pause resumes
     auth_user: str = ""                # login for this download (Basic / Digest / NTLM / FTP)
     auth_pass: str = ""                # protected with vault.protect (DPAPI on Windows)
+    mirrors: list = field(default_factory=list)  # other addresses of the same file (pieces come from all)
     # runtime only
     speed: float = 0.0
     eta: float = -1.0
     retries: int = 0
+    sources: list = field(default_factory=list)  # [{host, state, note, open, limit, speed}] while it runs
+    missing: bool = False              # finished, but the file isn't in its folder any more (deleted/moved)
 
-    RUNTIME = ("speed", "eta", "retries")
+    RUNTIME = ("speed", "eta", "retries", "sources", "missing")
 
     @property
     def path(self) -> str:
@@ -90,6 +95,13 @@ class DownloadItem:
     def expired(self) -> bool:
         """The link stopped working (expired, or needs the page again): renew the address."""
         return self.status == Status.ERROR and self.error.startswith(EXPIRED)
+
+    @property
+    def label(self) -> str:
+        """What the Status column says."""
+        if self.status == Status.COMPLETED and self.missing:
+            return MISSING
+        return self.error if self.status == Status.ERROR and self.error else self.status
 
     @property
     def needs_login(self) -> bool:

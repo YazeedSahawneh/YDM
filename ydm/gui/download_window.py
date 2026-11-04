@@ -24,7 +24,7 @@ from ..engine.gallery import fetch_media_info
 from ..engine.video_downloader import has_ffmpeg
 from ..utils import human_eta, human_size, human_speed, open_path, open_with, reveal_in_folder
 from . import icons, theme
-from .dialogs import _hairline, _Job, _segment_qss, find_urls, looks_like_video_page
+from .dialogs import MirrorsDialog, _hairline, _Job, _segment_qss, find_urls, looks_like_video_page
 from .hudbar import HudBar
 
 
@@ -205,6 +205,11 @@ class DownloadWindow(QWidget):
         self.btn_login.clicked.connect(lambda: self._show_login(True))
         buttons = QHBoxLayout()
         buttons.addWidget(self.btn_login)
+        self.btn_mirrors = icons.put(QPushButton(" Mirrors"), "plugs", "text", 16)
+        self.btn_mirrors.setObjectName("flat")
+        self.btn_mirrors.setToolTip("Other addresses of the same file: pieces come from all of them at once")
+        self.btn_mirrors.clicked.connect(self._mirrors)
+        buttons.addWidget(self.btn_mirrors)
         buttons.addStretch(1)
         buttons.addWidget(cancel)
         buttons.addWidget(self.btn_later)
@@ -237,6 +242,11 @@ class DownloadWindow(QWidget):
         addr_row.addWidget(addr_legend)
         addr_row.addWidget(self.addr, 1)
         addr_row.addWidget(copy)
+        self.btn_mirrors_p = icons.put(QPushButton(""), "plugs", "text", 14)
+        self.btn_mirrors_p.setObjectName("flat")
+        self.btn_mirrors_p.setToolTip("Mirrors: other addresses of the same file")
+        self.btn_mirrors_p.clicked.connect(self._mirrors)
+        addr_row.addWidget(self.btn_mirrors_p)
         grid = QGridLayout()
         grid.setHorizontalSpacing(16)
         grid.setVerticalSpacing(5)
@@ -322,6 +332,7 @@ class DownloadWindow(QWidget):
         if video:
             self.form.setRowVisible(4, False)
         self.btn_login.setVisible(not video and not self.form.isRowVisible(4))
+        self.btn_mirrors.setVisible(not video)
         self._setup_for_url()
 
     def _setup_for_url(self):
@@ -468,6 +479,15 @@ class DownloadWindow(QWidget):
     def _item(self):
         return self.manager.get(self.item_id) if self.item_id else None
 
+    def _mirrors(self):
+        item = self._item()
+        if not item:
+            self.live.setText("Enter the address first, then add its mirrors.")
+            return
+        dlg = MirrorsDialog(item, self)
+        if dlg.exec():
+            self.manager.add_mirrors(item.id, dlg.urls())
+
     def _copy_address(self):
         item = self._item()
         if item:
@@ -534,6 +554,8 @@ class DownloadWindow(QWidget):
             self.main.renew_address(item.id)
         elif item and item.needs_login:
             self.main.login_for(item.id)
+        elif item and item.missing:
+            self.manager.restart(item.id)
 
     def apply_theme(self):
         self.btn_file.setStyleSheet(_segment_qss(0, 2))
@@ -554,7 +576,9 @@ class DownloadWindow(QWidget):
 
     def _open_file(self):
         item = self.manager.get(self.item_id) if self.item_id else None
-        if item and os.path.exists(item.path):
+        if item and not os.path.exists(item.path):
+            item.missing = True
+        elif item:
             self.manager.mark_seen(item.id)
             open_path(item.path)
             self.close()
@@ -624,14 +648,18 @@ class DownloadWindow(QWidget):
         self.conn_active.setText(" · ".join(x for x in ("auto" if item.auto_connections else "", working) if x))
         self.conn_active.setToolTip("YDM is picking the count: it adds connections while they add speed"
                                     if item.auto_connections else "")
-        fix = "Renew address" if item.expired and item.kind == "file" else "Log in…" if item.needs_login else ""
+        fix = "Renew address" if item.expired and item.kind == "file" else "Log in…" if item.needs_login else \
+            "Download again" if item.missing else ""
         self.btn_fix.setText(fix)
         self.btn_fix.setVisible(bool(fix))
         done = item.status == Status.COMPLETED
-        self.btn_open.setVisible(done)
+        self.btn_open.setVisible(done and not item.missing)
         self.btn_pause.setVisible(not done)
         self.btn_hide.setText("Close" if done else "Hide")
-        if done:
+        if done and item.missing:
+            self.live.setText("The file isn't in its folder any more: it was deleted or moved.")
+            self.live.setStyleSheet(f"color: {theme.INK['Error']};")
+        elif done:
             self.live.setText("Download complete.")
             self.live.setStyleSheet(f"color: {theme.INK['Completed']};")
         elif item.status == Status.ERROR:
@@ -645,7 +673,9 @@ class DownloadWindow(QWidget):
         icons.put(self.btn_pause, "resume" if paused else "pause", "text", 16)
         for b in (self.btn_later_p, self.btn_cancel):
             b.setVisible(not done)
-        self.btn_with.setVisible(done)
+        self.btn_with.setVisible(done and not item.missing)
+        self.btn_mirrors_p.setVisible(item.kind == "file" and not done
+                                      and not item.url.lower().startswith(("ftp://", "ftps://")))
         self.btn_save.setVisible(item.status != Status.PROCESSING)
         fm = QFontMetrics(self.addr.font())
         self.addr.setText(fm.elidedText(item.url, Qt.ElideMiddle, max(120, self.addr.width())))
