@@ -18,6 +18,11 @@ How it works (the same idea IDM uses, plus a few tricks):
   6. The connection count can change while it runs (set_connections): extra
      workers join by splitting the biggest pieces, surplus ones finish their
      current chunk and leave their piece to the others.
+  7. In auto mode YDM picks the count itself (_Tuner): it starts where this
+     server was fastest last time, adds connections while each step still buys
+     at least 10 % more speed, and settles on the best count once it stops
+     paying (your line is full, or the server caps the total). It tries one
+     step up again every 30 s in case the route got faster.
 """
 from __future__ import annotations
 
@@ -43,6 +48,8 @@ STEAL_MIN = 256 * 1024           # near the end, idle connections still split pi
 MAX_RETRIES = 6
 SLOW_RATIO = 0.3                 # a connection below 30% of the median speed…
 SLOW_TICKS = 4                   # …for this many seconds gets reconnected
+AUTO_START = 6                   # auto mode, first visit to a server
+AUTO_MAX = 32
 DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/130.0 Safari/537.36")
 
@@ -67,6 +74,49 @@ class Fatal(RuntimeError):
     """Retrying won't help (link expired, login refused, file changed)."""
 
 
+class _Tuner:
+    """Hill-climbs the connection count on measured total speed. feed() gets one speed
+    sample a second and returns a new count when it wants one."""
+    SETTLE = 2              # seconds after a change before measuring (handshakes, TCP slow start)
+    MEASURE = 3             # seconds averaged per step
+    GAIN = 1.10             # a step must buy at least 10 % more speed
+    REPROBE = 30            # seconds settled before trying one step up again
+
+    def __init__(self, n: int, ceiling: int):
+        self.n, self.ceiling = n, max(1, ceiling)
+        self.best_n, self.best_rate = n, 0.0
+        self.settled = False         # found the best count (stays True after a re-probe)
+        self._climbing = True
+        self._tick = 0
+        self._samples: list[float] = []
+
+    def feed(self, rate: float, remaining: int) -> int | None:
+        self._tick += 1
+        if not self._climbing:
+            if self._tick >= self.REPROBE and self.n < self.ceiling:
+                self._climbing, self._tick, self._samples, self.best_rate = True, 0, [], 0.0
+            return None
+        if self._tick <= self.SETTLE:
+            return None
+        self._samples.append(rate)
+        if len(self._samples) < self.MEASURE:
+            return None
+        measured = sum(self._samples) / len(self._samples)
+        self._samples, self._tick = [], 0
+        if measured <= 0 or remaining < measured * 6:
+            return None              # stalled, or too close to the end to learn anything
+        if measured > self.best_rate * self.GAIN:
+            self.best_rate, self.best_n = measured, self.n
+            if self.n < self.ceiling:
+                self.n = min(self.ceiling, self.n + max(2, self.n // 2))
+                return self.n
+        self._climbing, self.settled = False, True
+        if self.n != self.best_n:    # the last step didn't pay: go back to the best count
+            self.n = self.best_n
+            return self.n
+        return None
+
+
 class HttpDownloader:
     def __init__(self, item: DownloadItem, limiter: RateLimiter,
                  resolve_dir: Callable[[DownloadItem], str], hosts: HostMemory | None = None):
@@ -87,6 +137,7 @@ class HttpDownloader:
         self._target = 0                              # how many workers the user wants right now
         self._leaving = 0                             # workers told to leave that haven't yet
         self._joined = False                          # all workers finished: no more can join
+        self._tuner: _Tuner | None = None             # auto connection count
         headers = {"User-Agent": DEFAULT_UA, "Accept-Encoding": "identity"}
         headers.update({k: v for k, v in item.headers.items() if v})
         creds = auth.credentials_for(item)
@@ -103,6 +154,12 @@ class HttpDownloader:
         self._stop.set()
 
     def set_connections(self, n: int) -> None:
+        """The user changed the count: that wins over auto mode."""
+        self.item.auto_connections = False
+        self._tuner = None
+        self._resize(n)
+
+    def _resize(self, n: int) -> None:
         """Change the number of connections of a running download."""
         n = max(1, min(64, int(n)))
         self.item.connections = n
@@ -200,8 +257,13 @@ class HttpDownloader:
             item.segments = []
 
     def _connections(self) -> int:
-        n = max(1, self.item.connections)
         limit = self.hosts.limit(self.host)
+        if self.item.auto_connections:
+            n = self.hosts.best(self.host) or AUTO_START
+            n = min(n, limit) if limit else n
+            self.item.connections = n
+            return n
+        n = max(1, self.item.connections)
         return min(n, limit) if limit else n
 
     # ------------------------------------------------------ segmented mode
@@ -216,6 +278,9 @@ class HttpDownloader:
         item.downloaded = sum(s.done for s in item.segments)
         with self._lock:
             self._target = self._connections()
+            if self.item.auto_connections:
+                limit = self.hosts.limit(self.host)
+                self._tuner = _Tuner(self._target, min(AUTO_MAX, limit) if limit else AUTO_MAX)
             self._threads = [threading.Thread(target=self._worker, daemon=True) for _ in range(self._target)]
             self._alive = len(self._threads)
             for t in self._threads:
@@ -234,6 +299,8 @@ class HttpDownloader:
         watcher.join()
         if self._accepted:
             self.hosts.note_limit(self.host, self._accepted)
+        elif self._tuner is not None and self._tuner.settled:
+            self.hosts.note_best(self.host, self._tuner.best_n)
 
     def _next_segment(self) -> Segment | None:
         with self._lock:
@@ -380,7 +447,19 @@ class HttpDownloader:
         prev: dict[int, int] = {}
         slow: dict[int, int] = {}
         best = 0.0                      # best single-connection speed lately (for the last few pieces)
+        last_total = self.item.downloaded
         while not finished.wait(1.0):
+            total = self.item.downloaded
+            tuner = self._tuner
+            if tuner is not None:
+                if self._accepted:      # the server refused a connection: it set the limit, stop tuning
+                    self._tuner = None
+                else:
+                    remaining = sum(s.remaining for s in self.item.segments)
+                    want = tuner.feed(total - last_total, remaining)
+                    if want is not None and self._tuner is tuner and not self._stop.is_set():
+                        self._resize(want)
+            last_total = total
             with self._lock:
                 segs = self.item.segments
                 active = [s for s in segs if s.active]

@@ -213,8 +213,9 @@ class DetailsPane(QFrame):
             f["Resume"].setText(("Yes" if item.resumable else "No") if started
                                 else ("Checking…" if item.status in Status.ACTIVE else "—"))
         active = [s for s in item.segments if s.active]
-        f["Connections"].setText(f"{len(active)} active of {item.connections}" if item.status == Status.DOWNLOADING
-                                 else str(item.connections))
+        auto = " (auto)" if item.auto_connections else ""
+        f["Connections"].setText(f"{len(active)} active of {item.connections}{auto}"
+                                 if item.status == Status.DOWNLOADING else f"{item.connections}{auto}")
         self._fill_table(item)
 
     def _fill_table(self, item: DownloadItem) -> None:

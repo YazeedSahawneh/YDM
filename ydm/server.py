@@ -1,9 +1,10 @@
 """Tiny local HTTP endpoint the browser extension talks to (127.0.0.1 only).
 
 GET  /ping  -> {"app": "YDM", "version": "..."}
-POST /add   -> {"url": "...", "kind": "file"|"video"|"batch", "filename", "referrer",
+POST /add   -> {"url": "...", "kind": "file"|"video"|"batch"|"gallery", "filename", "referrer",
                 "cookies", "userAgent", "fileSize", "urls" (batch only),
-                "video_format", "convert", "quick" (start a video without asking)}
+                "video_format", "convert", "quick" (start without asking)}
+                gallery = every photo/video of the post at url (gallery-dl)
 POST /info  -> {"url", "cookies", "userAgent", "referrer"} → the video's quality list
 """
 from __future__ import annotations

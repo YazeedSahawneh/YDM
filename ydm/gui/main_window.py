@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QHe
 
 from .. import tools, updater
 from ..config import APP_NAME, APP_TITLE, APP_VERSION, CATEGORY_NAMES, UPDATE_REPO, Settings, is_downloadable_url
-from ..engine import DownloadManager, Status
+from ..engine import DownloadManager, Status, gallery
 from ..utils import human_speed, open_path, reveal_in_folder
 from . import hudbar, icons, theme
 from .dialogs import BatchDialog, CountdownDialog, LoginDialog, RenewDialog, SettingsDialog, find_urls
@@ -44,6 +44,7 @@ class MainWindow(QMainWindow):
         self._quitting = False
         self._last_clip = ""
         self._jobs: set[str] = set()       # running maintenance jobs
+        self._post_dirs: dict[str, str] = {}   # post job -> folder picked for it
         self._update_path = None
         self._manual_update = False
         self._manual_ytdlp = False
@@ -146,7 +147,7 @@ class MainWindow(QMainWindow):
         tl = mb.addMenu("T&ools")
         tl.addAction(self.a_options)
         icons.put(tl.addAction("Install video tools", lambda: self.install_video_tools(force=True)), "tools")
-        icons.put(tl.addAction("Update yt-dlp", lambda: self.update_ytdlp(manual=True)), "refresh")
+        icons.put(tl.addAction("Update yt-dlp and gallery-dl", lambda: self.update_ytdlp(manual=True)), "refresh")
         icons.put(tl.addAction("Open download folder", lambda: os.makedirs(self.settings.download_dir, exist_ok=True)
                                or open_path(self.settings.download_dir)), "folder")
 
@@ -459,7 +460,25 @@ class MainWindow(QMainWindow):
         else:
             self.add_url(urls[0] if urls else "")
 
+    def save_post(self, url: str, headers: dict, save_dir: str = ""):
+        """Every photo/video of a social post: gallery-dl lists them, the engine downloads them."""
+        if not gallery.available() and sys.platform == "win32":
+            self.install_video_tools(force=False)
+            self.banner.show_message("Installing gallery-dl, which saves photos from social sites. "
+                                     "Try again in a moment.", "tools", progress=0)
+            return
+        job = f"post:{url}"
+        self._post_dirs[job] = save_dir
+        if self._spawn(job, lambda: gallery.take(url, headers)) and self.tray.isVisible():
+            self.tray.showMessage(APP_NAME, "Reading the post…", QSystemTrayIcon.Information, 1500)
+
     def handle_browser_request(self, payload: dict):
+        if payload.get("kind") == "gallery" or payload.get("video_format") == gallery.OPTION:
+            headers = {k: v for k, v in {"Referer": payload.get("referrer") or "",
+                                         "User-Agent": payload.get("userAgent") or "",
+                                         "Cookie": payload.get("cookies") or ""}.items() if v}
+            self.save_post(payload.get("url", ""), headers)
+            return
         if payload.get("kind") == "batch":              # "Download all links" from the extension
             urls = [u for u in payload.get("urls") or [] if str(u).lower().startswith(("http://", "https://"))]
             if urls:
@@ -473,7 +492,7 @@ class MainWindow(QMainWindow):
         if kind == "file" and self._renew_from_browser(payload, headers):
             return
         quick = (kind == "file" and not self.settings.show_add_dialog) or \
-            (kind == "video" and bool(payload.get("quick")))      # quality already picked on the page
+            bool(payload.get("quick"))          # quality already picked on the page / "Save photo"
         if not quick:
             self.add_url(payload.get("url", ""), payload, kind)
             return
@@ -644,12 +663,18 @@ class MainWindow(QMainWindow):
             if item.kind == "file":
                 m.addAction(icons.icon("link"), "Renew download address…", lambda: self.renew_address(item.id))
             m.addAction(icons.icon("key"), "Login…", lambda: self.login_for(item.id))
-            conn = m.addMenu(icons.icon("plugs"), f"Connections ({item.connections})")
+            conn = m.addMenu(icons.icon("plugs"), f"Connections ({'auto, ' if item.auto_connections else ''}"
+                                                  f"{item.connections})")
+            a = conn.addAction("Automatic", lambda: self._for_selected(self.manager.set_auto_connections))
+            a.setCheckable(True)
+            a.setChecked(item.auto_connections)
+            a.setToolTip("Applies from the next resume")
+            conn.addSeparator()
             for n in (1, 2, 4, 8, 12, 16, 24, 32):
                 a = conn.addAction(str(n), lambda n=n: self._for_selected(
                     lambda i: self.manager.set_connections(i, n)))
                 a.setCheckable(True)
-                a.setChecked(n == item.connections)
+                a.setChecked(n == item.connections and not item.auto_connections)
         m.addAction(icons.icon("refresh"), "Restart from zero", lambda: self._for_selected(self.manager.restart))
         m.addSeparator()
         m.addAction(icons.icon("copy"), "Copy address", lambda: QGuiApplication.clipboard().setText(item.url))
@@ -764,10 +789,14 @@ class MainWindow(QMainWindow):
                     f"tools:{name}", (i + (d / t if t > 0 else 0)) / len(names)))
             return names
         if self._spawn("tools", work):
-            self.banner.show_message("Installing video tools (FFmpeg, Deno)…", "tools", progress=0)
+            self.banner.show_message("Installing video tools (FFmpeg, Deno, gallery-dl)…", "tools", progress=0)
 
     def update_ytdlp(self, manual: bool = False):
         def work():
+            try:
+                tools.update_gallery_dl()
+            except (OSError, subprocess.SubprocessError):
+                pass
             return tools.update_ytdlp()
         self._manual_ytdlp = manual
         if self._spawn("ytdlp", work) and manual:
@@ -793,14 +822,24 @@ class MainWindow(QMainWindow):
 
     def _on_bg_progress(self, job: str, value: float):
         if job.startswith("tools:"):
-            self.banner.show_message(f"Installing video tools: {job.split(':')[1].capitalize()}…", "tools",
+            self.banner.show_message(f"Installing video tools: {tools.NAMES.get(job.split(':')[1], '')}…", "tools",
                                      progress=value)
         elif job == "update":
             self.banner.show_message("Downloading the new version of YDM…", "update", progress=value)
 
     def _on_bg_done(self, job: str, result):
         self._jobs.discard(job)
-        if job == "tools":
+        if job.startswith("post:"):
+            items = self.manager.add_gallery(result, self._post_dirs.pop(job, ""))
+            what = result.label().replace("All ", "") if len(items) > 1 else result.label().lower()
+            text = f"Saving {what} from {result.uploader or result.title}"
+            if self.tray.isVisible():
+                self.tray.showMessage(APP_NAME, text, QSystemTrayIcon.Information, 3000)
+            else:
+                self.banner.show_message(text, "finished")
+                QTimer.singleShot(4000, self.banner.hide)
+            self.refresh()
+        elif job == "tools":
             self.banner.show_message("Video tools are ready: best quality and YouTube now work.", "finished")
             QTimer.singleShot(5000, self.banner.hide)
         elif job == "ytdlp":
@@ -837,8 +876,11 @@ class MainWindow(QMainWindow):
 
     def _on_bg_failed(self, job: str, message: str):
         self._jobs.discard(job)
+        if job.startswith("post:"):
+            self._post_dirs.pop(job, None)
+            job = "post"
         what = {"tools": "Couldn't install the video tools", "ytdlp": "Couldn't update yt-dlp",
-                "update": "Couldn't check for updates"}[job]
+                "update": "Couldn't check for updates", "post": "Couldn't save this post"}[job]
         if job == "update" and not self._manual_update:
             return                      # silent daily check: try again tomorrow
         self.banner.show_message(f"{what}: {message}", "update",

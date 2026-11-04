@@ -19,7 +19,9 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QFileDialog, QFormLayout
 from .. import tools
 from ..config import APP_NAME, category_for
 from ..engine import Status
-from ..engine.video_downloader import fetch_video_info, has_ffmpeg
+from ..engine import gallery
+from ..engine.gallery import fetch_media_info
+from ..engine.video_downloader import has_ffmpeg
 from ..utils import human_eta, human_size, human_speed, open_path, open_with, reveal_in_folder
 from . import icons, theme
 from .dialogs import _hairline, _Job, _segment_qss, find_urls, looks_like_video_page
@@ -109,10 +111,11 @@ class DownloadWindow(QWidget):
     def _build_setup(self) -> QWidget:
         w = QWidget()
         self.url_edit = QLineEdit()
-        self.url_edit.setPlaceholderText("Paste a link: a file, or a video page (YouTube and 1,800+ sites)")
+        self.url_edit.setPlaceholderText("Paste a link: a file, a video, or a post with photos (YouTube, Instagram, Facebook…)")
         self.url_edit.setClearButtonEnabled(True)
         self.btn_file = icons.put(QPushButton(" File"), "document", "text", 16)
-        self.btn_video = icons.put(QPushButton(" Video"), "video", "text", 16)
+        self.btn_video = icons.put(QPushButton(" Video / photos"), "video", "text", 16)
+        self.btn_video.setToolTip("A page with a video, a reel or photos: YDM reads it and lists what it can save")
         group = QButtonGroup(self)
         for i, b in enumerate((self.btn_file, self.btn_video)):
             b.setCheckable(True)
@@ -168,7 +171,8 @@ class DownloadWindow(QWidget):
         self.tools_row = QWidget()
         tr = QHBoxLayout(self.tools_row)
         tr.setContentsMargins(0, 0, 0, 0)
-        tools_text = QLabel("1080p and up, MP3 and YouTube need FFmpeg and Deno (about 250 MB, once).")
+        tools_text = QLabel("1080p and up, MP3, YouTube and photos from social sites need FFmpeg, Deno and "
+                            "gallery-dl (about 260 MB, once).")
         tools_text.setObjectName("muted")
         tools_text.setWordWrap(True)
         tools_btn = icons.put(QPushButton(" Install"), "tools", "text", 16)
@@ -334,8 +338,8 @@ class DownloadWindow(QWidget):
             self._info = None
             self.quality.clear()
             self.form.setRowVisible(3, False)
-            self.live.setText("Reading the video page…")
-            self._run(fetch_video_info, url, self.headers)
+            self.live.setText("Reading the page…")
+            self._run(fetch_media_info, url, self.headers)
         elif url != self._prestarted_url:
             self._prestart(url)
         self.adjustSize()
@@ -370,7 +374,9 @@ class DownloadWindow(QWidget):
         for label, spec, size, convert in info["options"]:
             it = QListWidgetItem(f"{label:<16}{('≈ ' + human_size(size)) if size else ''}")
             it.setData(Qt.UserRole, (spec, convert))
-            if convert == "mp3" or label.startswith("Audio"):
+            if spec == gallery.OPTION:
+                it.setIcon(icons.icon("image", theme.MUTED, 16))
+            elif convert == "mp3" or label.startswith("Audio"):
                 it.setIcon(icons.icon("music", theme.MUTED, 16))
             else:
                 it.setIcon(icons.icon("video", theme.MUTED, 16))
@@ -381,9 +387,10 @@ class DownloadWindow(QWidget):
         self.title.setText(_elide(self.title, info["title"], 430))
         by = info.get("uploader") or ""
         self.sub.setText(by)
-        note = "" if has_ffmpeg() else "Up to 720p until the video tools are installed."
+        only_photos = all(spec == gallery.OPTION for _l, spec, _s, _c in info["options"])
+        note = "" if has_ffmpeg() or only_photos else "Up to 720p until the video tools are installed."
         self.live.setText(note)
-        self.glyph.setPixmap(icons.pixmap("video", theme.MUTED, 28))
+        self.glyph.setPixmap(icons.pixmap("image" if only_photos else "video", theme.MUTED, 28))
         self.adjustSize()
 
     def _on_info_failed(self, ticket: int, message: str):
@@ -415,6 +422,11 @@ class DownloadWindow(QWidget):
                 self.live.setText("Wait for the quality list, or check the address.")
                 return
             spec, convert = current.data(Qt.UserRole)
+            if spec == gallery.OPTION:                 # every photo/video of the post, each its own download
+                self.main.save_post(url, self.headers, self.dir_edit.text().strip())
+                self._remember_folder()
+                self.close()
+                return
             item = self.manager.add(url, kind="video", video_format=spec, convert=convert,
                                     save_dir=self.dir_edit.text().strip(), headers=self.headers,
                                     title=(self._info or {}).get("title", ""))
@@ -608,7 +620,10 @@ class DownloadWindow(QWidget):
             self.conn_spin.blockSignals(False)
         self.conn_spin.setEnabled(not item.status == Status.COMPLETED and (item.resumable or item.kind == "video"
                                                                            or item.total < 0))
-        self.conn_active.setText(f"{active} working" if running and item.kind == "file" else "")
+        working = f"{active} working" if running and item.kind == "file" else ""
+        self.conn_active.setText(" · ".join(x for x in ("auto" if item.auto_connections else "", working) if x))
+        self.conn_active.setToolTip("YDM is picking the count: it adds connections while they add speed"
+                                    if item.auto_connections else "")
         fix = "Renew address" if item.expired and item.kind == "file" else "Log in…" if item.needs_login else ""
         self.btn_fix.setText(fix)
         self.btn_fix.setVisible(bool(fix))

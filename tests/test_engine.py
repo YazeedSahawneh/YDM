@@ -22,6 +22,23 @@ def _digest_ok(header, method, path):
     return f.get("username") == "u" and f.get("response") == want
 
 
+BIG = bytes(200 * 1024 * 1024)        # only the auto-connection tests (never finished)
+
+
+class _Bucket:
+    def __init__(self, rate):
+        self.rate, self.t, self.lock = rate, time.monotonic(), threading.Lock()
+    def take(self, n):
+        with self.lock:
+            self.t = max(self.t, time.monotonic()) + n / self.rate
+            wait = self.t - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+
+
+TOTAL_BUCKET = _Bucket(3 * 1024 * 1024)
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def log_message(self, *a): pass
@@ -39,6 +56,8 @@ class H(BaseHTTPRequestHandler):
         if "secret-digest" in self.path and not (got.startswith("Digest ") and _digest_ok(got, "GET", self.path)):
             return self._refuse(401, [("WWW-Authenticate", 'Digest realm="ydm", qop="auth", nonce="n0nce42", '
                                                           'algorithm=MD5')])
+        if "percap" in self.path or "totalcap" in self.path:
+            return self._serve_capped()
         if "throttle" in self.path:          # allows at most 4 parallel connections
             with ACTIVE_LOCK:
                 if ACTIVE[0] >= 4:
@@ -48,6 +67,25 @@ class H(BaseHTTPRequestHandler):
             finally:
                 with ACTIVE_LOCK: ACTIVE[0] -= 1
         self._serve()
+    def _serve_capped(self):
+        """percap: each connection gets 256 KB/s. totalcap: all connections share 3 MB/s."""
+        a, b = re.match(r"bytes=(\d+)-(\d*)", self.headers.get("Range", "bytes=0-")).groups()
+        a = int(a); b = int(b) if b else len(BIG) - 1
+        self.send_response(206)
+        self.send_header("Content-Range", f"bytes {a}-{b}/{len(BIG)}")
+        self.send_header("Content-Length", str(b - a + 1)); self.end_headers()
+        step = 32 * 1024
+        for i in range(a, b + 1, step):
+            n = min(step, b + 1 - i)
+            if "totalcap" in self.path:
+                TOTAL_BUCKET.take(n)
+            else:
+                time.sleep(n / (256 * 1024))
+            try:
+                self.wfile.write(BIG[i:i + n])
+            except OSError:
+                return
+
     def _serve(self):
         ranges = "norange" not in self.path
         rng = self.headers.get("Range")
@@ -80,7 +118,7 @@ base = f"http://127.0.0.1:{srv.server_port}"
 tmp = Path(tempfile.mkdtemp())
 from ydm.engine.hosts import HOSTS
 HOSTS._path = tmp / "hosts.json"           # keep the real host memory untouched
-s = Settings(download_dir=str(tmp / "dl"), connections=8)
+s = Settings(download_dir=str(tmp / "dl"), connections=8, auto_connections=False)   # fixed counts below
 m = DownloadManager(s, store_path=tmp / "store.json")
 
 def wait(item, states, t=60):
@@ -248,6 +286,114 @@ else:
     fc = m2.add(f"ftp://u:wrong@127.0.0.1:{fport}/big%20file.bin")
     wait(fc, {Status.ERROR, Status.COMPLETED}, 60); assert fc.error.startswith(LOGIN_NEEDED), fc.error
     fsrv.close_all(); print("OK FTP (login, anonymous, wrong password)")
+
+# 6b. automatic connection count
+from ydm.engine.http_downloader import AUTO_START, _Tuner
+t = _Tuner(6, 32)
+steps, rate = [], lambda n: min(n, 14) * 1e6          # each connection 1 MB/s until the line is full at 14
+for _ in range(80):
+    got = t.feed(rate(t.n), 10**12)
+    if got is not None: steps.append(got)
+    if t.settled: break
+assert steps[:3] == [9, 13, 19], steps
+assert t.settled and t.n == 13 and t.best_n == 13, (t.n, t.best_n, steps)      # 19 bought nothing: back to 13
+t2 = _Tuner(6, 32)
+for _ in range(20):
+    t2.feed(5e6, 10**12)                               # full line already: one try up, then back
+assert t2.settled and t2.n == 6, t2.n
+print("tuner:", steps, "-> settles at", t.n)
+
+s_auto = Settings(download_dir=str(tmp / "dl-auto"))
+assert s_auto.auto_connections
+ma = DownloadManager(s_auto, store_path=tmp / "store-auto.json")
+HOSTS._data.clear()
+pc = ma.add(base + "/percap/big.bin")
+assert pc.auto_connections
+wait(pc, {Status.DOWNLOADING}, 30)
+assert pc.connections == AUTO_START, pc.connections
+end = time.time() + 25
+while time.time() < end and pc.connections < 13: time.sleep(0.2)
+assert pc.connections >= 13, f"auto mode didn't add connections on a per-connection cap: {pc.connections}"
+print("auto, per-connection cap: climbed to", pc.connections, "connections")
+ma.set_connections(pc.id, 4)                          # the user takes over
+assert not pc.auto_connections
+time.sleep(1.5)
+assert pc.connections == 4 and sum(1 for x in pc.segments if x.active) <= 4
+ma.discard(pc.id)
+
+HOSTS._data.clear()
+tc = ma.add(base + "/totalcap/big.bin")
+wait(tc, {Status.DOWNLOADING}, 30)
+seen = set()
+end = time.time() + 22
+while time.time() < end:
+    seen.add(tc.connections); time.sleep(0.2)
+    if len(seen) > 1 and tc.connections == AUTO_START: break
+assert tc.connections == AUTO_START and max(seen) > AUTO_START, (seen, tc.connections)
+print("auto, shared cap: tried", sorted(seen), "-> back to", tc.connections)
+ma.pause(tc.id); wait(tc, {Status.PAUSED}, 15)
+assert HOSTS.best("127.0.0.1") == AUTO_START, HOSTS._data
+ma.discard(tc.id); ma.shutdown()
+print("OK auto connections (climbs on per-connection caps, holds on a full line, remembers per server)")
+
+# 6c. photos / posts (gallery-dl's JSON → downloads)
+from ydm.engine import gallery
+msgs = [[2, {"username": "nasa", "fullname": "NASA", "description": "Saturn\nrings", "post_shortcode": "C1"}],
+        [3, "https://scontent.cdninstagram.com/a.jpg?sig=1", {"username": "nasa", "post_shortcode": "C1", "num": 1,
+                                                            "extension": "jpg"}],
+        [3, "https://scontent.cdninstagram.com/b.jpg?sig=2", {"username": "nasa", "post_shortcode": "C1", "num": 2,
+                                                            "extension": "jpg"}],
+        [3, "ytdl:https://www.instagram.com/p/C1/", {"username": "nasa", "post_shortcode": "C1", "num": 3,
+                                                   "extension": "mp4"}]]
+post = gallery.parse("https://www.instagram.com/p/C1/", msgs,
+                     {"Cookie": "sessionid=x", "User-Agent": "UA"})
+assert [f.filename for f in post.files] == ["nasa_C1.jpg", "nasa_C1_2.jpg", "nasa_C1_3.mp4"], post.files
+assert post.title == "Saturn rings" and post.uploader == "NASA" and post.photos == 2
+assert post.files[2].kind == "video" and post.files[2].url == "https://www.instagram.com/p/C1/"
+assert "Cookie" not in post.files[0].headers                  # never hand the page's cookies to the CDN
+assert post.files[2].headers["Cookie"] == "sessionid=x" and post.files[0].headers["Referer"].endswith("/p/C1/")
+assert post.label() == "All 2 photos + 1 video", post.label()
+try:
+    gallery.parse("https://www.instagram.com/p/C2/", [[-1, {"error": "AbortExtraction",
+                                                             "message": "HTTP redirect to login page"}]])
+    raise SystemExit("an error answer should raise")
+except RuntimeError as exc:
+    assert "Log in" in str(exc), exc
+cf = gallery._cookie_file("https://www.instagram.com/p/C1/", "sessionid=abc; csrftoken=def")
+lines = Path(cf).read_text().splitlines(); os.unlink(cf)
+assert lines[1].split("\t") == [".instagram.com", "TRUE", "/", "TRUE", "0", "sessionid", "abc"], lines
+if gallery.available():
+    pics = gallery.collect(base + "/pics/photo.jpg")         # gallery-dl's direct-link support, end to end
+    assert [f.filename for f in pics.files] == ["photo.jpg"], pics.files
+    got = m2.add_gallery(pics, save_dir=str(tmp / "posts"))
+    wait(got[0], {Status.COMPLETED, Status.ERROR}, 60)
+    assert got[0].status == Status.COMPLETED and got[0].category == "Images", got[0].error
+    check(got[0])
+    print("OK posts (gallery-dl listing, names, cookies stay on the site, files downloaded)")
+else:
+    print("OK posts parsing (skip gallery-dl end to end: pip install gallery-dl)")
+
+# 6d. start with Windows: same switch as Task Manager's Startup apps
+from ydm import startup
+if startup.supported():
+    import winreg
+    startup.NAME = "YDM-selftest"
+    try:
+        startup.set_enabled(True); assert startup.is_enabled()
+        startup.set_enabled(False); assert not startup.is_enabled()
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, startup.RUN) as k:
+            assert "--minimized" in winreg.QueryValueEx(k, startup.NAME)[0]   # still listed, just disabled
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, startup.APPROVED, 0, winreg.KEY_SET_VALUE) as k:
+            winreg.SetValueEx(k, startup.NAME, 0, winreg.REG_BINARY, bytes([2]) + bytes(11))  # Task Manager: Enable
+        assert startup.is_enabled()
+    finally:
+        for key in (startup.RUN, startup.APPROVED):
+            try:
+                with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key, 0, winreg.KEY_SET_VALUE) as k:
+                    winreg.DeleteValue(k, startup.NAME)
+            except OSError:
+                pass
+    print("OK start with Windows (on/off shared with Task Manager)")
 
 # 7. bad url
 e = m2.add(base.replace(str(srv.server_port), "1") + "/x")

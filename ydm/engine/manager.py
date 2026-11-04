@@ -81,6 +81,7 @@ class DownloadManager:
         item = DownloadItem(url=url.strip(), kind=kind, filename=filename, save_dir=save_dir,
                             headers=headers or {}, video_format=video_format, title=title,
                             connections=connections or self.settings.connections,
+                            auto_connections=self.settings.auto_connections and not connections,
                             pending=pending, convert=convert)
         if filename:
             item.category = "Video" if kind == "video" else category_for(filename)
@@ -92,6 +93,22 @@ class DownloadManager:
         if start:
             self.start(item.id)
         return item
+
+    def add_gallery(self, post, save_dir: str = "", start: bool = True) -> list[DownloadItem]:
+        """Every photo/video of a post (engine.gallery.Post) as its own download, in the queue.
+        Files that need yt-dlp (HLS videos) go in as video items."""
+        items = []
+        for f in post.files:
+            if f.kind == "video":
+                item = self.add(f.url, kind="video", save_dir=save_dir, headers=f.headers, start=False,
+                                title=post.title)
+            else:
+                item = self.add(f.url, filename=f.filename, save_dir=save_dir, headers=f.headers, start=False)
+            self.queue(item.id)
+            items.append(item)
+        if start and items:
+            self.start_queue()
+        return items
 
     def start(self, item_id: str) -> None:
         with self._lock:
@@ -189,10 +206,18 @@ class DownloadManager:
         if not item:
             return
         item.connections = max(1, min(64, int(n)))
+        item.auto_connections = False
         entry = self._running.get(item_id)
         if entry and hasattr(entry[0], "set_connections"):
             entry[0].set_connections(item.connections)
         self._dirty = True
+
+    def set_auto_connections(self, item_id: str) -> None:
+        """Hand the connection count back to YDM; it takes effect from the next start/resume."""
+        item = self._items.get(item_id)
+        if item:
+            item.auto_connections = True
+            self._dirty = True
 
     def set_login(self, item_id: str, user: str, password: str, remember: bool = False) -> None:
         """Login for one download (Basic / Digest / NTLM / FTP). Restarts it if it was waiting for one."""

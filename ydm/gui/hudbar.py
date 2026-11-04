@@ -1,18 +1,19 @@
 """The progress bar: a sci-fi HUD gauge.
 
-Slanted cells between two brackets. Each cell is one slice of the file and
+Upright cells between two brackets. Each cell is one slice of the file and
 lights up as that slice arrives (straight from the real segment map), so you
 see every connection filling its own stretch, with a hot cell where each one
 is writing right now. The whole gauge shifts colour with the percentage, red
-→ amber → yellow → green (or stays in the theme's signal colour), glows
-softly, and on the big version a light sweeps across while bytes arrive.
+→ amber → yellow → green (or stays in the theme's signal colour). Lit cells
+give off a faint glow, a little stronger where a connection is writing, and
+on the big version a light sweeps across while bytes arrive.
 """
 from __future__ import annotations
 
 import time
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPolygonF
+from PySide6.QtGui import QColor, QFont, QPainter, QPolygonF, QRadialGradient
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ..engine import DownloadItem, Status
@@ -20,10 +21,6 @@ from . import theme
 from .models import coverage, heads
 
 BAR_MODE = ["shift"]          # "shift" or "theme"; set from Settings.bar_colors
-
-
-def _cell(x: float, y: float, w: float, h: float, skew: float) -> QPolygonF:
-    return QPolygonF([QPointF(x + skew, y), QPointF(x + w + skew, y), QPointF(x + w, y + h), QPointF(x, y + h)])
 
 
 def _bracket(p: QPainter, rect: QRectF, left: bool, color: QColor) -> None:
@@ -55,10 +52,9 @@ def draw_hud_bar(p: QPainter, rect: QRectF, item: DownloadItem | None, *, cell: 
 
     inner = rect.adjusted(5, 2, -5, -2)
     h = inner.height()
-    skew = min(h * 0.45, cell * 0.9)
     pitch = cell + gap
-    n = max(1, int((inner.width() - skew + gap) // pitch))
-    x0 = inner.left() + (inner.width() - skew - (n * pitch - gap)) / 2
+    n = max(1, int((inner.width() + gap) // pitch))
+    x0 = inner.left() + (inner.width() - (n * pitch - gap)) / 2
 
     if item is not None:
         cov = coverage(item, n)
@@ -70,15 +66,33 @@ def draw_hud_bar(p: QPainter, rect: QRectF, item: DownloadItem | None, *, cell: 
     unknown = item is not None and live and item.total <= 0
 
     p.setPen(Qt.NoPen)
-    # soft glow behind the lit stretch
+    # a faint glow: a haze behind the lit stretch, a halo round each lit cell, a bloom at each write head
     lit_idx = [i for i, c in enumerate(cov) if c > 0.05]
+    glow = 1.0 if live else 0.5
     if lit_idx and not unknown and st != Status.QUEUED:
-        a, b = x0 + lit_idx[0] * pitch, x0 + lit_idx[-1] * pitch + cell + skew
-        for grow, alpha in ((4.0, 0.06), (2.0, 0.10)):
+        a, b = x0 + lit_idx[0] * pitch, x0 + lit_idx[-1] * pitch + cell
+        for grow, alpha in ((4.0, 0.05), (2.0, 0.08)):
             g = QColor(color)
-            g.setAlphaF(alpha if live else alpha * 0.5)
+            g.setAlphaF(alpha * glow)
             p.setBrush(g)
             p.drawRoundedRect(QRectF(a - grow, inner.top() - grow, b - a + 2 * grow, h + 2 * grow), 3 + grow, 3 + grow)
+        for i in lit_idx:
+            g = QColor(color)
+            g.setAlphaF(0.12 * glow * cov[i])
+            p.setBrush(g)
+            p.drawRoundedRect(QRectF(x0 + i * pitch - 1.5, inner.top() - 1.5, cell + 3, h + 3), 2.5, 2.5)
+        if live:
+            for i in hot:
+                cx, cy = x0 + i * pitch + cell / 2, inner.center().y()
+                bloom = QRadialGradient(QPointF(cx, cy), h * 0.9)
+                c0 = QColor(color)
+                c0.setAlphaF(0.24)
+                c1 = QColor(color)
+                c1.setAlphaF(0.0)
+                bloom.setColorAt(0.0, c0)
+                bloom.setColorAt(1.0, c1)
+                p.setBrush(bloom)
+                p.drawEllipse(QPointF(cx, cy), h * 0.9, h * 0.9)
 
     unlit = QColor(theme.UNLIT)
     scan = (time.monotonic() * 1.4) % 2 if unknown else 0.0
@@ -104,7 +118,7 @@ def draw_hud_bar(p: QPainter, rect: QRectF, item: DownloadItem | None, *, cell: 
                 if d < 0.06:
                     c = QColor(c).lighter(int(100 + 55 * (1 - d / 0.06)))
         p.setBrush(c)
-        p.drawPolygon(_cell(x, inner.top(), cell, h, skew))
+        p.drawRoundedRect(QRectF(x, inner.top(), cell, h), 1.0, 1.0)
     p.restore()
     return color
 

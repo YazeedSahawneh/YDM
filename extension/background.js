@@ -1,7 +1,7 @@
 // YDM Integration — hands downloads and videos from Chrome/Edge to the YDM desktop app.
 // If YDM isn't running, the browser keeps the download as usual.
 
-const DEFAULTS = { enabled: true, videoButton: true, port: 9614, minSizeKB: 0, skipExt: "" };
+const DEFAULTS = { enabled: true, videoButton: true, imageButton: true, port: 9614, minSizeKB: 0, skipExt: "" };
 const bypass = new Set();          // URLs we deliberately give back to the browser
 
 const getSettings = () => chrome.storage.local.get(DEFAULTS);
@@ -124,6 +124,10 @@ chrome.runtime.onInstalled.addListener(() => {
       contexts: ["link", "image", "video", "audio"] });
     chrome.contextMenus.create({ id: "ydm-video", title: "Download the video on this page with YDM",
       contexts: ["page", "video", "frame"] });
+    chrome.contextMenus.create({ id: "ydm-post", title: "Save every photo and video of this post with YDM",
+      contexts: ["link"], targetUrlPatterns: ["*://*.instagram.com/*", "*://*.facebook.com/*", "*://*.x.com/*",
+        "*://*.twitter.com/*", "*://*.tiktok.com/*", "*://*.reddit.com/*", "*://*.pinterest.com/*",
+        "*://*.threads.net/*", "*://*.threads.com/*", "*://*.tumblr.com/*", "*://bsky.app/*"] });
     chrome.contextMenus.create({ id: "ydm-all", title: "Download all links on this page with YDM",
       contexts: ["page"] });
   });
@@ -135,6 +139,8 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
     const url = info.linkUrl || info.srcUrl;
     if (!url || !/^https?:/i.test(url)) return;
     ok = await sendToApp({ url, kind: "file", referrer: info.pageUrl || "" });
+  } else if (info.menuItemId === "ydm-post") {
+    ok = await sendToApp({ url: info.linkUrl, kind: "gallery", referrer: info.pageUrl || "" });
   } else if (info.menuItemId === "ydm-all") {
     const links = await chrome.tabs.sendMessage(tab.id, { type: "collect-links" }).catch(() => []);
     ok = links.length ? await sendToApp({ url: links[0], urls: links, kind: "batch", referrer: info.pageUrl || "" }) : true;
@@ -194,6 +200,14 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       payload = { url: msg.url, kind: "video", quick: true, video_format: msg.format, convert: msg.convert || "",
                   title: msg.title || "", referrer: sender.tab?.url || msg.url };
     } else payload = { url: msg.url, kind: "video", referrer: sender.tab?.url || msg.url };
+    sendToApp(payload).then((ok) => { if (!ok) flagOffline(); reply(ok); });
+    return true;
+  }
+  if (msg.type === "grab-photo") {
+    // one picture straight away, or every photo/video of the post (YDM asks gallery-dl for the list)
+    const payload = msg.post
+      ? { url: msg.post, kind: "gallery", referrer: msg.page }
+      : { url: msg.src, kind: "file", quick: true, referrer: msg.page };
     sendToApp(payload).then((ok) => { if (!ok) flagOffline(); reply(ok); });
     return true;
   }

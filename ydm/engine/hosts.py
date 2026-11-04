@@ -1,5 +1,6 @@
-"""Remembers servers that refuse or throttle extra connections, so the next
-download from them starts with a connection count they accept."""
+"""Remembers, per server, how many connections it accepts (it refused or
+throttled more) and how many gave the best speed (found by the auto tuner),
+so the next download from it starts right there."""
 from __future__ import annotations
 
 import json
@@ -34,17 +35,31 @@ class HostMemory:
     def limit(self, host: str) -> int | None:
         with self._lock:
             entry = self._load().get(host)
-        if not entry or time.time() - entry.get("t", 0) > EXPIRY:
+        if not entry or "limit" not in entry or time.time() - entry.get("t", 0) > EXPIRY:
             return None
         return int(entry["limit"])
 
+    def best(self, host: str) -> int | None:
+        """The connection count that was fastest here last time (auto mode)."""
+        with self._lock:
+            entry = self._load().get(host)
+        if not entry or "best" not in entry or time.time() - entry.get("tb", 0) > EXPIRY:
+            return None
+        return int(entry["best"])
+
     def note_limit(self, host: str, working: int) -> None:
         """A whole download saw the server take `working` parallel connections and refuse more."""
+        self._store(host, limit=max(1, working), t=time.time())
+
+    def note_best(self, host: str, n: int) -> None:
+        self._store(host, best=max(1, n), tb=time.time())
+
+    def _store(self, host: str, **fields) -> None:
         if not host:
             return
         with self._lock:
             data = self._load()
-            data[host] = {"limit": max(1, working), "t": time.time()}
+            data[host] = {**data.get(host, {}), **fields}
             try:
                 tmp = self._file().with_suffix(".tmp")
                 tmp.write_text(json.dumps(data), encoding="utf-8")

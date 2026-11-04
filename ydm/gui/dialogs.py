@@ -9,7 +9,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox,
                                QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPushButton,
                                QRadioButton, QSpinBox, QStackedWidget, QTimeEdit, QVBoxLayout, QWidget)
 
-from .. import tools, updater, vault
+from .. import startup, tools, updater, vault
 from ..config import APP_NAME, APP_VERSION, UPDATE_REPO, Settings
 from ..engine import Status
 from ..engine.auth import LOGINS
@@ -380,6 +380,12 @@ class SettingsDialog(Dialog):
         self.tray_box = QCheckBox("Closing the window keeps YDM running in the tray")
         self.tray_box.setChecked(settings.minimize_to_tray)
         gf.addRow("", self.tray_box)
+        self._startup_was = startup.is_enabled()
+        self.startup_box = QCheckBox("Start YDM when Windows starts (in the tray)")
+        self.startup_box.setChecked(self._startup_was)
+        self.startup_box.setToolTip("The same switch as YDM in Task Manager → Startup apps")
+        self.startup_box.setVisible(startup.supported())
+        gf.addRow("", self.startup_box)
         self.window_box = QCheckBox("Show a small window for each download (progress, then Open / Open folder)")
         self.window_box.setChecked(settings.progress_window)
         gf.addRow("", self.window_box)
@@ -391,12 +397,18 @@ class SettingsDialog(Dialog):
         gf.addRow("", self.clip_box)
 
         # Connection
-        c, cf = self._page("Connection", "More connections usually means faster, until the server says no. "
-                                         "YDM backs off on its own and remembers each server's limit.")
+        c, cf = self._page("Connection", "More connections are faster only until your line is full or the server "
+                                         "says no. On Automatic, YDM measures the speed while it adds connections, "
+                                         "stops where more stop helping, and remembers the best count per server.")
+        self.auto_conn = QCheckBox("Automatic (fastest count per server)")
+        self.auto_conn.setChecked(settings.auto_connections)
+        cf.addRow("Connections", self.auto_conn)
         self.conn = QSpinBox()
         self.conn.setRange(1, 32)
         self.conn.setValue(settings.connections)
-        cf.addRow("Connections per download", self.conn)
+        self.conn.setEnabled(not settings.auto_connections)
+        self.auto_conn.toggled.connect(lambda on: self.conn.setEnabled(not on))
+        cf.addRow("Fixed count", self.conn)
         self.active = QSpinBox()
         self.active.setRange(1, 10)
         self.active.setValue(settings.max_active)
@@ -767,9 +779,9 @@ class SettingsDialog(Dialog):
             rt = next(iter(tools.js_runtimes()), "none")
             self.tools_status.setText(f"Ready  ·  FFmpeg {ff}  ·  JavaScript: {rt}")
         else:
-            names = {"ffmpeg": "FFmpeg", "deno": "Deno"}
-            self.tools_status.setText("Missing: " + ", ".join(names.get(m, m) for m in missing)
-                                      + ". Without them videos stop at 720p and YouTube may fail.")
+            self.tools_status.setText("Missing: " + ", ".join(tools.NAMES.get(m, m) for m in missing)
+                                      + ". Without them videos stop at 720p, YouTube may fail and "
+                                        "photos from social sites can't be saved.")
 
     def _browse(self):
         d = QFileDialog.getExistingDirectory(self, "Download folder", self.dir_edit.text())
@@ -781,9 +793,15 @@ class SettingsDialog(Dialog):
         s.download_dir = self.dir_edit.text().strip() or s.download_dir
         s.use_category_folders = self.cat_box.isChecked()
         s.minimize_to_tray = self.tray_box.isChecked()
+        if self.startup_box.isChecked() != self._startup_was:
+            try:
+                startup.set_enabled(self.startup_box.isChecked())
+            except OSError:
+                pass
         s.notify_on_complete = self.notify_box.isChecked()
         s.watch_clipboard = self.clip_box.isChecked()
         s.connections = self.conn.value()
+        s.auto_connections = self.auto_conn.isChecked()
         s.max_active = self.active.value()
         s.speed_limit_kbps = self.limit.value()
         s.scheduler_enabled = self.sched_box.isChecked()

@@ -33,6 +33,8 @@ ydm/engine/hosts.py             per-host connection limit learned from 429/503 (
 ydm/engine/net.py               shared SSL context + httpx clients (warm_up at start), 1 MB socket reads, proxy
 ydm/engine/ftp_downloader.py    FTP/FTPS on the same segment engine (one session per piece, REST + RETR)
 ydm/engine/auth.py              logins: AutoAuth (Basic/Digest/NTLM via pyspnego), SiteLogins (logins.json)
+ydm/engine/gallery.py           photos/posts from social sites: gallery-dl.exe -J lists them, the engine downloads them
+ydm/startup.py                  start with Windows: HKCU Run + StartupApproved (the same switch as Task Manager)
 ydm/vault.py                    passwords at rest: DPAPI on Windows (base64 elsewhere, tests only)
 installer/YDM.iss               Inno Setup script (per-user install, shortcuts, optional start-with-Windows)
 ydm/gui/download_window.py      IDM-style small window per download: pre-start → choose → progress → done
@@ -49,7 +51,8 @@ extension/                      MV3: background.js (catch downloads, media sniff
 4. Each worker writes at `seg.pos` with `seek` + `write`. Progress lives in `Segment.done` and is saved every ~3 s, so a pause or crash can resume.
 5. `_finalize()` checks the size, then `os.replace(.ydm → final)`.
 6. Servers without range support fall back to `_run_single()` (one connection, restarts from 0 on retry).
-7. `set_connections(n)` changes the count while it runs: new workers join (they steal), surplus ones raise `_Surplus` between chunks and leave their piece to the others. The join loop in `_run_segmented` waits on `self._threads`, which can grow.
+7. Auto mode (`item.auto_connections`, default from `Settings.auto_connections`): `_connections()` starts at `hosts.best(host)` or `AUTO_START`, and `_Tuner` (fed once a second by `_watch`) steps up while a step buys ≥10 % more total speed, then settles on the best count and re-probes every 30 s; the best count is saved with `hosts.note_best`. A 429/503 stops tuning (the host limit wins). Any user change (`set_connections`) turns auto off for that item; the tuner itself uses `_resize`.
+8. `set_connections(n)` changes the count while it runs: new workers join (they steal), surplus ones raise `_Surplus` between chunks and leave their piece to the others. The join loop in `_run_segmented` waits on `self._threads`, which can grow.
 
 `FtpDownloader` subclasses `HttpDownloader` and only replaces `_probe`, `_open_range` and `_open_full` (each returns an object with `iter_raw`/`close`). Errors that retrying can't fix raise `Fatal` (no retries).
 
@@ -71,6 +74,9 @@ A link from the browser or Add URL starts downloading immediately as a `pending`
 - Never `fh.truncate()` to pre-allocate on Windows: it writes zeros (about 3 s per GB before the first byte). `_set_size_sparse` uses `SetEndOfFile` on a sparse file (4 GB in ~0 ms). The engine test asserts this.
 - Build httpx clients through `net.client()` (shared SSL context). A fresh context costs 0.25–1.2 s.
 - Workers read with `iter_raw` and one lock per chunk; `net` raises httpcore's read size to 1 MB. The UI stays smooth (event-loop p99 about 2 ms at 50 MB/s).
+
+### Photos and posts
+`gallery.fetch_media_info()` runs yt-dlp and (for `SOCIAL` hosts, or when yt-dlp finds nothing) gallery-dl side by side; a post with photos gets an extra quality-list entry whose format is `gallery.OPTION` ("gallery"). Choosing it calls `MainWindow.save_post()` → `gallery.take()` (the cached listing; signed links expire) → `manager.add_gallery()`, one queued item per file (`ytdl:` entries become video items). gallery-dl is a separate program in `tools\` (GPL, so it's not bundled into the exe); the dev venv's `gallery-dl.exe` is found too (`pip install gallery-dl`, test-only). The page's cookies go to gallery-dl as a temporary cookies.txt and are only forwarded to media URLs on the same site.
 
 ### Video
 `VideoDownloader` asks yt-dlp for the streams (`extract_info(download=False)`, or the Add dialog's cached info). Plain HTTP(S) streams (YouTube video + audio) are downloaded by child `HttpDownloader`s in parallel and merged with FFmpeg; their segments are saved in `item.parts`, so a resume re-reads fresh links and continues. HLS/DASH/other protocols fall back to `ydl.process_info()`.
@@ -97,6 +103,7 @@ The UI follows the direction in `PRODUCT.md` / `DESIGN.md`: studio-rack hi-fi, g
 - Mirror / multi-source downloads
 - Optional aria2c backend
 - Per-download speed limit, checksum verification
+- Auto connections: also probe *down* (fewer connections) on servers that slow down with many
 - Digest/NTLM proxy authentication (only Basic and SOCKS5 user/password today); FTP through a proxy
 - Playlist download for the video grabber
 - Publish the extension to the Chrome Web Store / Edge Add-ons (needs a developer account)

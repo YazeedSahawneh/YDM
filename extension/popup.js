@@ -1,4 +1,4 @@
-const DEFAULTS = { enabled: true, videoButton: true, port: 9614, minSizeKB: 0, skipExt: "" };
+const DEFAULTS = { enabled: true, videoButton: true, imageButton: true, port: 9614, minSizeKB: 0, skipExt: "" };
 const $ = (id) => document.getElementById(id);
 
 function size(n) {
@@ -13,12 +13,14 @@ async function init() {
   const s = await chrome.storage.local.get(DEFAULTS);
   $("enabled").checked = s.enabled;
   $("videoButton").checked = s.videoButton;
+  $("imageButton").checked = s.imageButton;
   $("port").value = s.port;
   $("minSizeKB").value = s.minSizeKB;
   $("skipExt").value = s.skipExt;
 
   $("enabled").addEventListener("change", (e) => chrome.storage.local.set({ enabled: e.target.checked }));
   $("videoButton").addEventListener("change", (e) => chrome.storage.local.set({ videoButton: e.target.checked }));
+  $("imageButton").addEventListener("change", (e) => chrome.storage.local.set({ imageButton: e.target.checked }));
   $("port").addEventListener("change", (e) => { chrome.storage.local.set({ port: Number(e.target.value) || 9614 }); check(); });
   $("minSizeKB").addEventListener("change", (e) => chrome.storage.local.set({ minSizeKB: Number(e.target.value) || 0 }));
   $("skipExt").addEventListener("change", (e) => chrome.storage.local.set({ skipExt: e.target.value }));

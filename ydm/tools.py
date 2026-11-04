@@ -2,6 +2,8 @@
 
 - FFmpeg   merges YouTube's separate video + audio streams (1080p and up)
 - Deno     JavaScript runtime yt-dlp needs to read YouTube's player
+- gallery-dl  lists the photos of a post (Instagram, Facebook, X, Reddit, …);
+           a standalone .exe that updates itself (-U)
 - yt-dlp   a newer copy (zip) that overrides the bundled one, because sites
            change often and a frozen .exe can't `pip install -U`
 
@@ -14,6 +16,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import threading
 import zipfile
@@ -29,7 +32,10 @@ TOOLS = {
                "ffmpeg-master-latest-win64-gpl.zip", ("ffmpeg.exe", "ffprobe.exe")),
     "deno": ("https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip",
              ("deno.exe",)),
+    "gallery-dl": ("https://github.com/mikf/gallery-dl/releases/latest/download/gallery-dl.exe",
+                   ("gallery-dl.exe",)),
 }
+NAMES = {"ffmpeg": "FFmpeg", "deno": "Deno", "gallery-dl": "gallery-dl"}
 YTDLP_LATEST_API = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
 YTDLP_ZIP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
 
@@ -51,6 +57,14 @@ def ffmpeg_path() -> str | None:
     return find("ffmpeg")
 
 
+def gallery_dl_path() -> str | None:
+    found = find("gallery-dl")
+    if found:
+        return found
+    beside = Path(sys.executable).parent / ("gallery-dl.exe" if os.name == "nt" else "gallery-dl")
+    return str(beside) if beside.exists() else None      # pip-installed into the venv (development)
+
+
 def js_runtimes() -> dict:
     """yt-dlp `js_runtimes` option: our Deno, else one already on the PC."""
     deno = find("deno")
@@ -69,6 +83,8 @@ def missing_for_video() -> list[str]:
         out.append("ffmpeg")
     if not js_runtimes():
         out.append("deno")
+    if not gallery_dl_path():
+        out.append("gallery-dl")
     return out
 
 
@@ -101,6 +117,10 @@ def download_to(url: str, folder: Path, filename: str, on_progress: Progress | N
 def install(name: str, on_progress: Progress | None = None, stop: threading.Event | None = None) -> str:
     url, wanted = TOOLS[name]
     target = tools_dir()
+    if url.endswith(".exe"):                  # a single program, no archive
+        tmp = download_to(url, target / "tmp", wanted[0], on_progress, stop)
+        os.replace(tmp, target / wanted[0])
+        return str(target / wanted[0])
     archive = download_to(url, target / "tmp", f"{name}.zip", on_progress, stop)
     try:
         with zipfile.ZipFile(archive) as zf:
@@ -199,6 +219,14 @@ def update_ytdlp(stop: threading.Event | None = None) -> str | None:
     os.replace(tmp, _ytdlp_zip())
     _write_state(app_version=APP_VERSION, ytdlp_zip_version=latest)
     return latest
+
+
+def update_gallery_dl() -> None:
+    """Our gallery-dl.exe updates itself in place (sites change often)."""
+    exe = tools_dir() / "gallery-dl.exe"
+    if exe.exists():
+        subprocess.run([str(exe), "-U"], capture_output=True, timeout=300,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
 
 
 def _version_key(v: str) -> tuple:

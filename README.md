@@ -3,7 +3,8 @@
 A personal IDM-style download manager for Windows, written from scratch in Python.
 
 **Features**
-- Multi-connection downloads (16 by default, up to 32) with **dynamic segmentation**: a finished connection takes half of the largest remaining piece, down to 256 KB at the end, so speed stays high to the last byte
+- **Automatic connection count**: YDM measures the speed while it adds connections (6 → 9 → 13 → 19…), keeps adding while each step still buys 10 % more, settles on the fastest count, tries again every 30 s, and remembers the best count per server for next time. A fixed count (1–32) is one click away (Options → Connection, or per download)
+- Multi-connection downloads with **dynamic segmentation**: a finished connection takes half of the largest remaining piece, down to 256 KB at the end, so speed stays high to the last byte
 - **Speed tricks**: the first request's data is kept (no separate probe round-trip), files are pre-allocated sparse (no NTFS zero-fill stall on big files), slow connections are reconnected, and a server that refuses extra connections makes YDM back off and remember that server's limit
 - **HTTP, HTTPS and FTP/FTPS**, all multi-connection (FTP uses one session per piece with `REST`)
 - **Proxy**: HTTP or SOCKS5 (with a user name and password), or the Windows proxy settings (Options → Proxy & logins)
@@ -15,8 +16,10 @@ A personal IDM-style download manager for Windows, written from scratch in Pytho
 - **Light and dark mode** (or match Windows), plus theme colours, in Options → Appearance
 - **HUD progress bar** that lights each slice of the file as it arrives, marks every working connection, and shifts colour with the percentage (red → amber → yellow → green); **theme colours** in Options → Appearance
 - **Video grabber** (yt-dlp: YouTube and 1,800+ sites) with a quality list showing sizes. YouTube's video and audio streams are downloaded with YDM's own multi-connection engine at the same time and merged with FFmpeg
-- **Video tools on demand**: YDM downloads FFmpeg and Deno itself (one click, ~250 MB once) and keeps yt-dlp current between releases
-- **Browser extension** for Chrome/Edge/Brave: catches downloads automatically, a **Download video** button over videos, a list of media streams the page plays, right-click "Download with YDM" / "Download all links"
+- **Photos, reels and posts from social sites** (Instagram, Facebook, X, Threads, TikTok, Reddit, Pinterest, Tumblr and a few hundred more, via gallery-dl): paste a post's link with *Video / photos*, or use the **Save photo** button / the video button on the page. "All N photos + M videos" saves the whole post in full size. Your browser's login for that site goes along, so posts your account can see work
+- **Video tools on demand**: YDM downloads FFmpeg, Deno and gallery-dl itself (one click, once) and keeps yt-dlp and gallery-dl current between releases
+- **Start with Windows** (in the tray): Options → General. It's the same switch as YDM in Task Manager → Startup apps, so turning it off in either place shows there too
+- **Browser extension** for Chrome/Edge/Brave: catches downloads automatically, a **Download video** button over videos and a **Save photo** button over big pictures (both find the post a feed item belongs to), "Save every photo and video of this post" on post links, a list of media streams the page plays, right-click "Download with YDM" / "Download all links"
 - **Updates itself** from GitHub Releases: downloads the new version in the background, one click to restart, downloads carry on
 - Queue, scheduler, speed limit, "when everything finishes: sleep / shut down", batch add, drag & drop and Ctrl+V for links, category folders, tray, notifications
 

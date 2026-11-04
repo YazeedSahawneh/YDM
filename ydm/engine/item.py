@@ -57,6 +57,7 @@ class DownloadItem:
     added: float = field(default_factory=time.time)
     finished: float = 0.0
     connections: int = 8
+    auto_connections: bool = False     # YDM picks the count: climbs while more connections add speed
     segments: list[Segment] = field(default_factory=list)
     headers: dict = field(default_factory=dict)
     video_format: str = ""

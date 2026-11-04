@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_NAME = "YDM"
 APP_TITLE = "YDM — Download Manager"
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.5.0"
 DEFAULT_PORT = 9614
 ACCENT = "#FFB547"          # amber: only on things you can press (buttons, selection)
 SIGNAL = "#3DDBC0"          # meter light: bytes arriving
@@ -65,7 +65,8 @@ def is_downloadable_url(url: str) -> bool:
 class Settings:
     download_dir: str = str(default_download_dir())
     use_category_folders: bool = True
-    connections: int = 16
+    connections: int = 16               # used when auto_connections is off
+    auto_connections: bool = True       # YDM finds the fastest count per server
     max_active: int = 3
     speed_limit_kbps: int = 0           # 0 = unlimited
     port: int = DEFAULT_PORT

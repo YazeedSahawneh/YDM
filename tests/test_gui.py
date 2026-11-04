@@ -93,6 +93,22 @@ assert len(bd.urls()) == 2; bd.grab().save(f"{out}/batch.png"); bd.close()
 for tab in (4, 5, 6, 7):
     sd = SettingsDialog(s, w, tab); sd.show(); pump(0.2); sd.grab().save(f"{out}/settings{tab}.png"); sd.close()
 vd = w.open_download_window(kind="video"); pump(0.3); vd.grab().save(f"{out}/add-video.png"); vd.close()
+# connections: automatic by default, the fixed count only when it's off; start-with-Windows untouched unless changed
+sd = SettingsDialog(s, w, 1); sd.show(); pump(0.1)
+assert sd.auto_conn.isChecked() and not sd.conn.isEnabled()
+sd.auto_conn.setChecked(False); assert sd.conn.isEnabled()
+assert sd.updated_settings().auto_connections is False
+sd.auto_conn.setChecked(True); assert sd.updated_settings().auto_connections is True
+assert sd.startup_box.isChecked() == sd._startup_was; sd.close()
+# a post with photos: "All N photos" in the quality list hands off to save_post
+from ydm.engine import gallery
+gd = w.open_download_window(kind="video"); pump(0.1)
+gd._on_info(gd._ticket, {"title": "Saturn", "uploader": "NASA", "options": [("All 3 photos", gallery.OPTION, 0, "")]})
+asked = []
+w.save_post = lambda url, headers, folder: asked.append(url)
+gd.url_edit.blockSignals(True); gd.url_edit.setText("https://www.instagram.com/p/C1/"); gd._start(True)
+assert asked == ["https://www.instagram.com/p/C1/"], asked
+del w.save_post
 # theme colours switch in place, Cancel in Appearance restores them
 sd = SettingsDialog(s, w, 6); sd.show(); pump(0.1)
 sd.theme_preview.connect(w.apply_theme)

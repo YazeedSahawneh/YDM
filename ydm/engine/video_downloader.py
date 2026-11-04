@@ -111,15 +111,18 @@ def fetch_video_info(url: str, headers: dict | None = None) -> dict:
     return {"title": info.get("title") or "video", "duration": info.get("duration"),
             "uploader": info.get("uploader") or info.get("channel") or "",
             "thumbnail": info.get("thumbnail"), "options": options, "merge": merge,
-            "ext": "mp4" if merge else info.get("ext", "mp4")}
+            "ext": "mp4" if merge else info.get("ext", "mp4"),
+            "has_video": bool(heights)}      # False: no picture stream (an audio page, or just a plain image)
 
 
 def browser_info(payload: dict) -> dict:
     """Quality list for the extension's on-page menu (also warms the cache, so the download
-    that follows starts without reading the page again)."""
+    that follows starts without reading the page again). Posts with photos get an
+    "All N photos" entry (format "gallery")."""
+    from .gallery import fetch_media_info
     headers = {"Referer": payload.get("referrer") or "", "User-Agent": payload.get("userAgent") or "",
                "Cookie": payload.get("cookies") or ""}
-    info = fetch_video_info(str(payload["url"]), headers)
+    info = fetch_media_info(str(payload["url"]), headers)
     return {"title": info["title"], "uploader": info["uploader"], "duration": info["duration"],
             "options": [{"label": label, "format": spec, "size": size, "convert": conv}
                         for label, spec, size, conv in info["options"]]}
@@ -143,6 +146,7 @@ class VideoDownloader:
 
     def set_connections(self, n: int) -> None:
         self.item.connections = n
+        self.item.auto_connections = False
         for i, child in enumerate(list(self._children)):      # video stream gets most, audio a quarter
             child.set_connections(n if i == 0 else max(2, n // 4))
 
@@ -246,7 +250,8 @@ class VideoDownloader:
             sub = DownloadItem(url=s["url"], save_dir=item.save_dir,
                                filename=f"{final.stem}.f{fid}.{s.get('ext') or 'bin'}",
                                headers=dict(s.get("http_headers") or {}),
-                               connections=item.connections if i == 0 else max(2, item.connections // 4))
+                               connections=item.connections if i == 0 else max(2, item.connections // 4),
+                               auto_connections=item.auto_connections and i == 0)
             old = saved.get(fid)
             if old and old.get("segments") and os.path.exists(os.path.join(item.save_dir, old["filename"]) + ".ydm"):
                 sub.filename, sub.total, sub.resumable = old["filename"], int(old["total"]), True
