@@ -19,7 +19,7 @@ class Status:
 
 EXPIRED = "Link expired"              # error prefixes the GUI keys off
 LOGIN_NEEDED = "Login required"
-MISSING = "File missing (deleted or moved)"
+MISSING = "File missing"                # deleted or moved since it finished
 
 
 @dataclass

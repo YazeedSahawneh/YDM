@@ -645,7 +645,8 @@ class DownloadWindow(QWidget):
         self.conn_spin.setEnabled(not item.status == Status.COMPLETED and (item.resumable or item.kind == "video"
                                                                            or item.total < 0))
         working = f"{active} working" if running and item.kind == "file" else ""
-        self.conn_active.setText(" · ".join(x for x in ("auto" if item.auto_connections else "", working) if x))
+        auto = "auto" if item.auto_connections and item.status != Status.COMPLETED else ""
+        self.conn_active.setText(" · ".join(x for x in (auto, working) if x))
         self.conn_active.setToolTip("YDM is picking the count: it adds connections while they add speed"
                                     if item.auto_connections else "")
         fix = "Renew address" if item.expired and item.kind == "file" else "Log in…" if item.needs_login else \

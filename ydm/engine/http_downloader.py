@@ -20,8 +20,9 @@ How it works (the same idea IDM uses, plus a few tricks):
   6. The connection count can change while it runs (set_connections): extra
      workers join by splitting the biggest pieces, surplus ones finish their
      current chunk and leave their piece to the others.
-  7. Mirrors: other addresses of the same file (typed in, or announced by the
-     server with Metalink `Link: <…>; rel=duplicate` headers). Each is checked
+  7. Mirrors: other addresses of the same file (typed in, announced by the
+     server with Metalink `Link: <…>; rel=duplicate` headers, or listed in the
+     Metalink XML that mirror systems like MirrorCache/MirrorBrain send when asked). Each is checked
      first: same size, and the same bytes as a piece already downloaded. Then
      every new connection goes to the server with the most room for it (each
      server keeps its own connection limit, so the limits add up), weighted by
@@ -34,6 +35,7 @@ How it works (the same idea IDM uses, plus a few tricks):
 """
 from __future__ import annotations
 
+import html
 import os
 import re
 import shutil
@@ -59,6 +61,7 @@ SLOW_RATIO = 0.3                 # a connection below 30% of the median speed…
 SLOW_TICKS = 4                   # …for this many seconds gets reconnected
 SAMPLE = 64 * 1024               # bytes compared to accept a mirror as the same file
 MAX_MIRRORS = 8
+METALINK_MIN = 32 * 1024 * 1024  # only big files are worth asking the server for its mirror list
 AUTO_START = 6                   # auto mode, first visit to a server
 AUTO_MAX = 32
 DEFAULT_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -98,7 +101,6 @@ class _Source:
 
     def __init__(self, url: str, primary: bool = False, limit: int = 0):
         self.url = url
-        self.host = urlparse(url).hostname or ""
         self.primary = primary
         self.state = "ok" if primary else "checking"     # checking | ok | bad
         self.note = ""
@@ -107,6 +109,11 @@ class _Source:
         self.speed = 0.0         # bytes/s per connection lately
         self.fails = 0           # connection failures in a row
         self.cool_until = 0.0    # busy or failing: leave it alone until then
+
+    @property
+    def host(self) -> str:
+        """The server actually answering (after redirects)."""
+        return urlparse(self.url).hostname or ""
 
     def info(self) -> dict:
         return {"host": self.host, "url": self.url, "state": self.state, "note": self.note, "open": self.open,
@@ -128,6 +135,11 @@ class _Tuner:
         self._climbing = True
         self._tick = 0
         self._samples: list[float] = []
+
+    def restart(self, n: int) -> None:
+        """Something changed outside (a mirror joined with its own connections): climb again from n."""
+        self.n = self.best_n = n
+        self.best_rate, self._climbing, self._tick, self._samples = 0.0, True, 0, []
 
     def feed(self, rate: float, remaining: int) -> int | None:
         self._tick += 1
@@ -298,6 +310,8 @@ class HttpDownloader:
         if found:
             self.add_mirrors(found)
         self._layout(name, total, resumable)
+        if self.supports_mirrors and self.item.resumable and total >= METALINK_MIN:
+            threading.Thread(target=self._ask_metalink, daemon=True).start()
 
     def _layout(self, name: str, total: int, resumable: bool) -> None:
         """Pick the file name and folder, split into segments and reserve the file."""
@@ -387,6 +401,26 @@ class HttpDownloader:
         for src in new:
             threading.Thread(target=self._check_mirror, args=(src,), daemon=True).start()
 
+    def _ask_metalink(self) -> None:
+        """Mirror systems hand out the mirror list as Metalink XML when asked for it. Servers that
+        don't just start sending the file: that answer is closed at once."""
+        url = auth.split_userinfo(self.item.url)[0]
+        body = b""
+        try:
+            with self.client.stream("GET", url, headers={
+                    "Accept": "application/metalink4+xml, application/metalink+xml;q=0.9"}) as r:
+                if r.status_code != 200 or "metalink" not in r.headers.get("content-type", ""):
+                    return
+                for chunk in r.iter_bytes():
+                    body += chunk
+                    if len(body) > 2 * 1024 * 1024:
+                        return
+        except httpx.HTTPError:
+            return
+        found = _metalink_xml(body.decode("utf-8", "replace"), self.item.total)
+        if found and not self._stop.is_set():
+            self.add_mirrors(found)
+
     def _mirror_http(self) -> httpx.Client:
         """Mirrors are other sites: they never get this download's cookies or login."""
         with self._lock:
@@ -400,13 +434,16 @@ class HttpDownloader:
     def _sample(self) -> tuple[int, bytes] | None:
         """SAMPLE bytes this download already has on disk, to compare a mirror against."""
         end = time.monotonic() + 60
-        while not self._stop.is_set() and time.monotonic() < end:
+        while not self._stop.is_set() and not self._joined and time.monotonic() < end:
             with self._lock:
                 seg = next((s for s in self.item.segments if s.done >= SAMPLE), None)
             if seg is not None:
-                with open(self.item.part_path, "rb") as fh:
-                    fh.seek(seg.start)
-                    return seg.start, fh.read(SAMPLE)
+                try:
+                    with open(self.item.part_path, "rb") as fh:
+                        fh.seek(seg.start)
+                        return seg.start, fh.read(SAMPLE)
+                except OSError:
+                    return None              # finished (renamed) meanwhile
             self._stop.wait(0.25)
         return None
 
@@ -435,7 +472,11 @@ class HttpDownloader:
             grow = not self._joined and not self._stop.is_set()
             n = self._target + (AUTO_START if self.item.auto_connections else 0)
         if grow:
-            self._resize(min(AUTO_MAX if self.item.auto_connections else 64, max(n, self._target)))
+            n = min(AUTO_MAX if self.item.auto_connections else 64, max(n, self._target))
+            tuner = self._tuner
+            if tuner is not None:
+                tuner.restart(n)             # the new server has its own limit: find the best total again
+            self._resize(n)
 
     def _pick_source(self) -> _Source | None:
         """The server with the most room for one more connection, favouring the fast ones."""
@@ -787,6 +828,15 @@ def _metalink_mirrors(responses) -> list[str]:
                 if re.search(r"rel\s*=\s*\"?duplicate", params, re.I) and url.lower().startswith(("http://", "https://")):
                     found.append(url)
     return list(dict.fromkeys(found))[:MAX_MIRRORS]
+
+
+def _metalink_xml(text: str, total: int) -> list[str]:
+    """Mirror addresses from a Metalink 3/4 document, if it describes a file of this size."""
+    sizes = {int(x) for x in re.findall(r"<size>\s*(\d+)\s*</size>", text)}
+    if sizes and total not in sizes:
+        return []                        # it describes some other file
+    urls = [html.unescape(u.strip()) for u in re.findall(r"<url\b[^>]*>([^<]+)</url>", text)]
+    return list(dict.fromkeys(u for u in urls if u.lower().startswith(("http://", "https://"))))[:MAX_MIRRORS]
 
 
 def _preallocate(path: str, total: int) -> None:

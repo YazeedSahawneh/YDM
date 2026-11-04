@@ -54,6 +54,8 @@ class DownloadManager:
         self._load()
         self._ticker = threading.Thread(target=self._tick_loop, daemon=True)
         self._ticker.start()
+        # its own thread: a file on a network drive that's gone can take seconds to answer
+        threading.Thread(target=self._files_loop, daemon=True).start()
 
     # ------------------------------------------------------------- queries
     def items(self) -> list[DownloadItem]:
@@ -460,15 +462,16 @@ class DownloadManager:
                 gone.append(item)
         return gone
 
+    def _files_loop(self) -> None:
+        while not self._closing:
+            self.check_files()
+            time.sleep(4)
+
     def _tick_loop(self) -> None:
-        last_save = last_check = time.monotonic()
+        last_save = time.monotonic()
         was_busy = False
-        self.check_files()
         while not self._closing:
             time.sleep(0.5)
-            if time.monotonic() - last_check > 4:
-                last_check = time.monotonic()
-                self.check_files()
             self._update_speeds()
             self._scheduler_tick()
             self._fill_slots()

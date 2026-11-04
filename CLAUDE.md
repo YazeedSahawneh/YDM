@@ -75,6 +75,12 @@ A link from the browser or Add URL starts downloading immediately as a `pending`
 - Build httpx clients through `net.client()` (shared SSL context). A fresh context costs 0.25–1.2 s.
 - Workers read with `iter_raw` and one lock per chunk; `net` raises httpcore's read size to 1 MB. The UI stays smooth (event-loop p99 about 2 ms at 50 MB/s).
 
+### Mirrors
+`item.mirrors` (persisted) are other addresses of the same file; `HttpDownloader.sources` holds a `_Source` per server at run time (`[0]` = the item's own address). Mirrors come from the user (`manager.add_mirrors`), from `Link: rel=duplicate` headers on the probe (`_metalink_mirrors`), or from Metalink XML asked for in the background for files ≥ 32 MB (`_ask_metalink`, `_metalink_xml`, size must match). `_check_mirror` compares SAMPLE bytes already on disk with the same range from the mirror before it's used. `_pick_source` gives each new connection to the server with the most room (own `limit`, `cool_until`), weighted by per-connection speed. A source whose link dies is dropped (`_drop` → `_SourceGone`) only while another good one exists; otherwise the old Fatal/expired path stands. Mirrors never get the item's cookies or login (`_mirror_http`). FTP doesn't use mirrors (`supports_mirrors = False`). `item.sources` is a runtime snapshot for the GUI.
+
+### File missing
+`manager.check_files()` runs on its own thread every 4 s (a vanished network drive can block) and sets the runtime `item.missing` for finished items whose file is gone; `item.label` is what the Status column shows. "Download again" is `manager.restart`.
+
 ### Photos and posts
 `gallery.fetch_media_info()` runs yt-dlp and (for `SOCIAL` hosts, or when yt-dlp finds nothing) gallery-dl side by side; a post with photos gets an extra quality-list entry whose format is `gallery.OPTION` ("gallery"). Choosing it calls `MainWindow.save_post()` → `gallery.take()` (the cached listing; signed links expire) → `manager.add_gallery()`, one queued item per file (`ytdl:` entries become video items). gallery-dl is a separate program in `tools\` (GPL, so it's not bundled into the exe); the dev venv's `gallery-dl.exe` is found too (`pip install gallery-dl`, test-only). The page's cookies go to gallery-dl as a temporary cookies.txt and are only forwarded to media URLs on the same site.
 
@@ -100,7 +106,6 @@ The UI follows the direction in `PRODUCT.md` / `DESIGN.md`: studio-rack hi-fi, g
 - This is a clean-room app. Don't add code that bypasses DRM, paywalls or other software's licensing.
 
 ## Roadmap ideas (not done yet)
-- Mirror / multi-source downloads
 - Optional aria2c backend
 - Per-download speed limit, checksum verification
 - Auto connections: also probe *down* (fewer connections) on servers that slow down with many

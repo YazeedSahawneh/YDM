@@ -393,6 +393,13 @@ assert mm.status == Status.COMPLETED, mm.error
 check(mm)
 assert mm.mirrors == [lh + "/grp-B/f.bin"], mm.mirrors        # the stylesheet link isn't a mirror
 assert GBYTES.get("B", 0) > 2 * 1024 * 1024, GBYTES
+from ydm.engine.http_downloader import _metalink_xml
+meta4 = ('<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="f.iso">'
+         '<size>418381824</size><url location="am" priority="1">https://a.example/f.iso</url>'
+         '<url priority="2">https://b.example/f.iso?x=1&amp;y=2</url><url>ftp://c.example/f.iso</url>'
+         '<metaurl mediatype="torrent">https://a.example/f.iso.torrent</metaurl></file></metalink>')
+assert _metalink_xml(meta4, 418381824) == ["https://a.example/f.iso", "https://b.example/f.iso?x=1&y=2"]
+assert _metalink_xml(meta4, 5) == []                          # a list for another file is ignored
 HOSTS._data.clear()
 print("OK mirrors (limits add up, wrong files refused, a dead link covered, Metalink found)")
 

@@ -39,6 +39,8 @@ def draw_hud_bar(p: QPainter, rect: QRectF, item: DownloadItem | None, *, cell: 
     p.save()
     p.setRenderHint(QPainter.Antialiasing)
     st = status or (item.status if item else Status.DOWNLOADING)
+    if item is not None and item.missing:
+        st = Status.ERROR                          # finished, but the file was deleted or moved
     frac = fraction if fraction is not None else (item.progress if item else 0.0)
     color = theme.progress_color(frac, Status.DOWNLOADING if st in (Status.CONNECTING, Status.PROCESSING) else st,
                                  BAR_MODE[0])
