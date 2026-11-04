@@ -58,8 +58,15 @@ jobs:
       - name: Attach to the release
         shell: pwsh
         run: |
+          # checkout brings a tag without its message: fetch the real (annotated) tag for the notes
+          git fetch --force origin "refs/tags/$($env:TAG):refs/tags/$($env:TAG)"
           gh release view $env:TAG *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create $env:TAG --title "YDM $env:VER" --notes-from-tag --verify-tag
+            $notes = (git tag -l --format='%(contents)' $env:TAG | Out-String).Trim()
+            if (-not $notes) { $notes = "YDM $env:VER" }
+            Set-Content -Path release-notes.md -Value $notes -Encoding utf8
+            gh release create $env:TAG --title "YDM $env:VER" --notes-file release-notes.md --verify-tag
+            if ($LASTEXITCODE -ne 0) { throw "Could not create the release $env:TAG" }
           }
           gh release upload $env:TAG "dist\YDM-Setup-$env:VER.exe" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Could not attach the installer" }
