@@ -11,8 +11,10 @@ How it works (the same idea IDM uses, plus a few tricks):
      still in progress ("dynamic segmentation"), so all connections stay busy
      until the very end.
   4. A watcher reconnects any connection running far below the others (a bad
-     route or a slow CDN node), and a server that answers 429/503 to an extra
-     connection makes that connection retire; the host's limit is remembered.
+     route or a slow CDN node). A server that refuses an extra connection
+     (429/503, or 403/421/509 while the other connections still work, or it
+     keeps cutting that one connection) makes that connection retire, its
+     piece goes to the others, and the host's limit is remembered.
   5. Progress of every segment is saved, so a paused or crashed download
      resumes from where each segment stopped.
   6. The connection count can change while it runs (set_connections): extra
@@ -297,7 +299,7 @@ class HttpDownloader:
             running[0].join()
         finished.set()
         watcher.join()
-        if self._accepted:
+        if self._accepted and not isinstance(self._error, Fatal):   # an expired link isn't a limit
             self.hosts.note_limit(self.host, self._accepted)
         elif self._tuner is not None and self._tuner.settled:
             self.hosts.note_best(self.host, self._tuner.best_n)
@@ -375,6 +377,8 @@ class HttpDownloader:
                 raise _Throttled(code)
             if code == 401:
                 raise Fatal(f"{LOGIN_NEEDED}: the server refused the login")
+            if code in (403, 421, 509) and self._open > 0:
+                raise _Throttled(code)      # the others still download: it's a connection limit, not the link
             if code in (403, 404, 410) or (code == 200 and self.item.downloaded):
                 raise Fatal(f"{EXPIRED}: renew the address to continue (HTTP {code})")
             raise RuntimeError(f"Server stopped honouring ranges (HTTP {code})")
@@ -438,6 +442,14 @@ class HttpDownloader:
                 raise
             except (httpx.HTTPError, OSError, RuntimeError) as exc:
                 attempts += 1
+                with self._lock:
+                    receiving = self._open
+                if attempts >= 2 and receiving > 0:
+                    # this connection keeps failing while the others download: the server allows only
+                    # that many (some cut extra connections instead of saying so). Leave the piece to them.
+                    with self._lock:
+                        self._accepted = max(self._accepted, receiving)
+                    raise _Retire from exc
                 if attempts > MAX_RETRIES:
                     raise exc
                 self._stop.wait(min(2 ** attempts, 20))

@@ -8,7 +8,7 @@ from ydm.engine import DownloadManager, Status
 DATA = os.urandom(24 * 1024 * 1024 + 12345)
 SHA = hashlib.sha256(DATA).hexdigest()
 
-ACTIVE = [0]; ACTIVE_LOCK = threading.Lock(); MAX_SEEN = [0]
+ACTIVE = [0]; ACTIVE_LOCK = threading.Lock(); MAX_SEEN = [0]; LIMIT3 = [0]
 
 VALID = ["A"]          # /exp/<token>: only the current token works (an expiring link)
 
@@ -58,6 +58,19 @@ class H(BaseHTTPRequestHandler):
                                                           'algorithm=MD5')])
         if "percap" in self.path or "totalcap" in self.path:
             return self._serve_capped()
+        if "limit3" in self.path:            # 3 parallel connections; extras get a 403 or are cut off
+            with ACTIVE_LOCK:
+                full = LIMIT3[0] >= 3
+                if not full:
+                    LIMIT3[0] += 1
+            if full:
+                if "cut" in self.path:
+                    self.close_connection = True
+                    return                      # hang up without an answer
+                return self._refuse(403)
+            try: return self._serve()
+            finally:
+                with ACTIVE_LOCK: LIMIT3[0] -= 1
         if "throttle" in self.path:          # allows at most 4 parallel connections
             with ACTIVE_LOCK:
                 if ACTIVE[0] >= 4:
@@ -286,6 +299,18 @@ else:
     fc = m2.add(f"ftp://u:wrong@127.0.0.1:{fport}/big%20file.bin")
     wait(fc, {Status.ERROR, Status.COMPLETED}, 60); assert fc.error.startswith(LOGIN_NEEDED), fc.error
     fsrv.close_all(); print("OK FTP (login, anonymous, wrong password)")
+
+# 6a. servers that refuse extra connections rudely (403, or hanging up) instead of 429/503
+for how in ("403", "cut"):
+    HOSTS._data.clear()
+    rf = m2.add(base + f"/slow-limit3-{how}/f.bin", connections=8)
+    wait(rf, {Status.COMPLETED, Status.ERROR}, 120)
+    assert rf.status == Status.COMPLETED, f"{how}: {rf.error}"
+    check(rf)
+    assert HOSTS.limit("127.0.0.1") == 3, (how, HOSTS._data)
+    print(f"refused with {how}: completed on 3 connections, limit remembered")
+HOSTS._data.clear()
+print("OK servers that refuse extra connections (403 / hang up)")
 
 # 6b. automatic connection count
 from ydm.engine.http_downloader import AUTO_START, _Tuner
