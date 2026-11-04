@@ -11,6 +11,7 @@ SHA = hashlib.sha256(DATA).hexdigest()
 
 ACTIVE = [0]; ACTIVE_LOCK = threading.Lock(); MAX_SEEN = [0]; LIMIT3 = [0]
 GROUPS, GMAX, GBYTES, DEAD = {}, {}, {}, [False]       # mirror tests
+TOOL_FILES = {}                                        # tools install test
 
 VALID = ["A"]          # /exp/<token>: only the current token works (an expiring link)
 
@@ -50,6 +51,10 @@ class H(BaseHTTPRequestHandler):
             self.send_header(k, v)
         self.send_header("Content-Length", "0"); self.end_headers()
     def do_GET(self):
+        if self.path.startswith("/tool/"):       # tools install test: a program file
+            body = TOOL_FILES.get(self.path.rsplit("/", 1)[-1], b"")
+            self.send_response(200 if body else 404); self.send_header("Content-Length", str(len(body)))
+            self.end_headers(); self.wfile.write(body); return
         if "/exp/" in self.path and self.path.rsplit("/", 1)[-1] != VALID[0]:
             return self._refuse(403)
         got = self.headers.get("Authorization", "")
@@ -488,6 +493,29 @@ if gallery.available():
     print("OK posts (gallery-dl listing, names, cookies stay on the site, files downloaded)")
 else:
     print("OK posts parsing (skip gallery-dl end to end: pip install gallery-dl)")
+
+# 6c2. installing gallery-dl: try each source until one downloads and actually runs
+from ydm import tools
+venv_gdl = Path(sys.executable).parent / ("gallery-dl.exe" if os.name == "nt" else "gallery-dl")
+if os.name == "nt" and venv_gdl.exists():
+    TOOL_FILES["broken.exe"] = b"MZ not really a program" * 100
+    TOOL_FILES["good.exe"] = venv_gdl.read_bytes()      # the venv's own launcher: a program that runs
+    saved = tools._gallery_dl_sources, tools.tools_dir
+    tdir = tmp / "tools"; tdir.mkdir()
+    tools.tools_dir = lambda: tdir
+    tools._gallery_dl_sources = lambda: [base + "/tool/missing.exe", base + "/tool/broken.exe", base + "/tool/good.exe"]
+    try:
+        got = tools.install("gallery-dl")
+        assert got == str(tdir / "gallery-dl.exe") and tools._runs(Path(got)), got
+        tools._gallery_dl_sources = lambda: [base + "/tool/missing.exe", base + "/tool/broken.exe"]
+        (tdir / "gallery-dl.exe").unlink()
+        try:
+            tools.install("gallery-dl"); raise SystemExit("a source that doesn't run must not be installed")
+        except RuntimeError as exc:
+            assert "didn't start" in str(exc) and not (tdir / "gallery-dl.exe").exists(), exc
+    finally:
+        tools._gallery_dl_sources, tools.tools_dir = saved
+    print("OK gallery-dl install (a missing or broken source is skipped, only a working program is kept)")
 
 # 6d. start with Windows: same switch as Task Manager's Startup apps
 from ydm import startup

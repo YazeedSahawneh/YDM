@@ -32,9 +32,13 @@ TOOLS = {
                "ffmpeg-master-latest-win64-gpl.zip", ("ffmpeg.exe", "ffprobe.exe")),
     "deno": ("https://github.com/denoland/deno/releases/latest/download/deno-x86_64-pc-windows-msvc.zip",
              ("deno.exe",)),
-    "gallery-dl": ("https://github.com/mikf/gallery-dl/releases/latest/download/gallery-dl.exe",
-                   ("gallery-dl.exe",)),
+    # stable releases moved to Codeberg (GitHub releases have no files any more); the address of the
+    # newest one comes from Codeberg's API, see _gallery_dl_sources()
+    "gallery-dl": ("codeberg:mikf/gallery-dl", ("gallery-dl.exe",)),
 }
+# fallback: gallery-dl's official daily builds (linked from its README as "Nightly Builds")
+GALLERY_DL_NIGHTLY = "https://github.com/gdl-org/builds/releases/latest/download/gallery-dl_windows.exe"
+CODEBERG_LATEST = "https://codeberg.org/api/v1/repos/{}/releases/latest"
 NAMES = {"ffmpeg": "FFmpeg", "deno": "Deno", "gallery-dl": "gallery-dl"}
 YTDLP_LATEST_API = "https://api.github.com/repos/yt-dlp/yt-dlp/releases/latest"
 YTDLP_ZIP_URL = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp"
@@ -117,10 +121,8 @@ def download_to(url: str, folder: Path, filename: str, on_progress: Progress | N
 def install(name: str, on_progress: Progress | None = None, stop: threading.Event | None = None) -> str:
     url, wanted = TOOLS[name]
     target = tools_dir()
-    if url.endswith(".exe"):                  # a single program, no archive
-        tmp = download_to(url, target / "tmp", wanted[0], on_progress, stop)
-        os.replace(tmp, target / wanted[0])
-        return str(target / wanted[0])
+    if name == "gallery-dl":
+        return _install_gallery_dl(target, on_progress, stop)
     archive = download_to(url, target / "tmp", f"{name}.zip", on_progress, stop)
     try:
         with zipfile.ZipFile(archive) as zf:
@@ -136,6 +138,49 @@ def install(name: str, on_progress: Progress | None = None, stop: threading.Even
     if not path.exists():
         raise RuntimeError(f"{wanted[0]} was not in the download")
     return str(path)
+
+
+def _gallery_dl_sources() -> list[str]:
+    """Where to get gallery-dl.exe, best first: the newest stable release on Codeberg, then the
+    official daily build on GitHub."""
+    from .engine import net
+    urls = []
+    try:
+        r = net.get(CODEBERG_LATEST.format(TOOLS["gallery-dl"][0].split(":", 1)[1]))
+        assets = r.json().get("assets", []) if r.status_code == 200 else []
+        urls += [a["browser_download_url"] for a in assets if a.get("name") == "gallery-dl.exe"]
+    except (OSError, ValueError, KeyError):
+        pass
+    return urls + [GALLERY_DL_NIGHTLY]
+
+
+def _runs(exe: Path) -> bool:
+    """Does this copy start on this PC? (A missing Visual C++ runtime makes it fail at once.)"""
+    try:
+        res = subprocess.run([str(exe), "--version"], capture_output=True, timeout=60,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return res.returncode == 0 and bool(res.stdout.strip())
+
+
+def _install_gallery_dl(target: Path, on_progress: Progress | None, stop: threading.Event | None) -> str:
+    """Try each source until one downloads and actually runs here."""
+    problems = []
+    for url in _gallery_dl_sources():
+        try:
+            tmp = download_to(url, target / "tmp", "gallery-dl.exe", on_progress, stop)
+        except RuntimeError as exc:
+            problems.append(f"{url.split('/')[2]}: {exc}")
+            continue
+        if _runs(tmp):
+            os.replace(tmp, target / "gallery-dl.exe")
+            return str(target / "gallery-dl.exe")
+        tmp.unlink(missing_ok=True)
+        problems.append(f"{url.split('/')[2]}: the program didn't start")
+        if stop is not None and stop.is_set():
+            break
+    raise RuntimeError("gallery-dl couldn't be installed (" + "; ".join(problems) + ")")
 
 
 # --------------------------------------------------------- yt-dlp hot update

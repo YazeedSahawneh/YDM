@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_NAME = "YDM"
 APP_TITLE = "YDM — Download Manager"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 DEFAULT_PORT = 9614
 ACCENT = "#FFB547"          # amber: only on things you can press (buttons, selection)
 SIGNAL = "#3DDBC0"          # meter light: bytes arriving
