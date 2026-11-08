@@ -6,7 +6,12 @@ A personal IDM-style download manager for Windows, written from scratch in Pytho
 - **Automatic connection count**: YDM measures the speed while it adds connections (6 → 9 → 13 → 19…), keeps adding while each step still buys 10 % more, settles on the fastest count, tries again every 30 s, and remembers the best count per server for next time. A fixed count (1–32) is one click away (Options → Connection, or per download)
 - **Mirrors (several servers at once)**: give a download other addresses of the same file (right-click → *Mirrors…*, or the Mirrors button in its window), or let YDM find them: servers that announce copies (Metalink headers, or the Metalink mirror list that MirrorCache/MirrorBrain sites like openSUSE send) are picked up by themselves. Every mirror is checked first (same size, same bytes), each server keeps its own connection limit so the limits add up, faster servers get more connections, and if one link dies the others finish the file. Measured on openSUSE's ISO: 10 MB/s from the main server, 25–42 MB/s with its mirrors, SHA-256 identical
 - **Servers that refuse extra connections** (429/503, a 403, or just hanging up) no longer fail the download: the refused connection steps aside and the server's limit is remembered
-- **File missing**: when a finished file is deleted or moved, the list says *File missing* (in red) instead of Completed, and opening it offers *Download again*
+- **File missing**: when a finished file is deleted or moved, the list says *File missing* (in red) instead of Completed, and opening it offers *Download again*. *Clear N missing* (above the list, or Downloads → Clear missing) takes them all off the list
+- **Saves to your Downloads folder** (not a YDM subfolder), like the browser would; category folders are an option
+- **Compact view**: the *Compact* button above the list (or Ctrl+M) turns YDM into a small window with just your downloads; *Full view* brings everything back
+- **YDM's own window edges**: its own title bar (with the menus in it) on the main window, the download windows and the dialogs, while Windows keeps the shadow, rounded corners, Snap and resizing. A download window's title shows its progress and speed
+- **Finish window, no double notification**: when a download is done its window says so (Open / Open folder); there's no Windows notification on top. A download you hid comes back finished. *Open when done* opens the file by itself, and *Don't show this window when a download finishes* turns the finish window off (Options → General turns it back on)
+- **No waiting for Start**: a file that finishes downloading while its window still asks for a name and folder moves straight to the finish screen
 - Multi-connection downloads with **dynamic segmentation**: a finished connection takes half of the largest remaining piece, down to 256 KB at the end, so speed stays high to the last byte
 - **Speed tricks**: the first request's data is kept (no separate probe round-trip), files are pre-allocated sparse (no NTFS zero-fill stall on big files), slow connections are reconnected, and a server that refuses extra connections makes YDM back off and remember that server's limit
 - **HTTP, HTTPS and FTP/FTPS**, all multi-connection (FTP uses one session per piece with `REST`)
@@ -22,9 +27,9 @@ A personal IDM-style download manager for Windows, written from scratch in Pytho
 - **Photos, reels and posts from social sites** (Instagram, Facebook, X, Threads, TikTok, Reddit, Pinterest, Tumblr and a few hundred more, via gallery-dl): paste a post's link with *Video / photos*, or use the **Save photo** button / the video button on the page. "All N photos + M videos" saves the whole post in full size. Your browser's login for that site goes along, so posts your account can see work
 - **Video tools on demand**: YDM downloads FFmpeg, Deno and gallery-dl itself (one click, once) and keeps yt-dlp and gallery-dl current between releases
 - **Start with Windows** (in the tray): Options → General. It's the same switch as YDM in Task Manager → Startup apps, so turning it off in either place shows there too
-- **Browser extension** for Chrome/Edge/Brave: catches downloads automatically, a **Download video** button over videos and a **Save photo** button over big pictures (both find the post a feed item belongs to), "Save every photo and video of this post" on post links, a list of media streams the page plays, right-click "Download with YDM" / "Download all links"
+- **Browser extension** for Chrome, Edge, Brave, Opera and Firefox: catches downloads automatically, a **Download video** button over videos and a **Save photo** button over big pictures (both find the post a feed item belongs to), "Save every photo and video of this post" on post links, a list of media streams the page plays, right-click "Download with YDM" / "Download all links"
 - **Updates itself** from GitHub Releases: downloads the new version in the background, one click to restart, downloads carry on
-- Queue, scheduler, speed limit, "when everything finishes: sleep / shut down", batch add, drag & drop and Ctrl+V for links, category folders, tray, notifications
+- Queue, scheduler, speed limit, "when everything finishes: sleep / shut down", batch add, drag & drop and Ctrl+V for links, category folders, tray, a notification when a download fails
 
 ## 1. Run it
 
@@ -42,10 +47,18 @@ Video tools: YDM offers to install FFmpeg and Deno the first time you grab a vid
 
 ## 2. Install the browser extension
 
-1. Open `chrome://extensions` (or `edge://extensions`)
+Easiest: Options → Browser → click your browser. YDM opens its extensions page and the extension folder.
+
+**Chrome, Edge, Brave, Opera**
+1. Open `chrome://extensions` (`edge://extensions`, `brave://extensions`, `opera://extensions`)
 2. Turn on **Developer mode**
 3. Click **Load unpacked** and select the `extension` folder (installed copies: Start menu → *YDM browser extension folder*)
 4. Pin the YDM icon; the popup should show **Connected** while the app is running
+
+**Firefox** (121 or newer)
+- To try it: open `about:debugging#/runtime/this-firefox` → **Load Temporary Add-on…** → pick `manifest.json` in the extension folder. Firefox forgets it when it closes.
+- For good: Firefox only keeps add-ons that Mozilla has signed. Install `YDM-Firefox.xpi` from the release page (about:addons → ⚙ → *Install Add-on From File…*). The release workflow signs it when the repo has the `AMO_JWT_ISSUER` / `AMO_JWT_SECRET` secrets (free API keys from addons.mozilla.org → Developer Hub → *Manage API Keys*).
+- If the popup says it needs access to all sites, click **Allow on all sites**.
 
 If YDM isn't running, downloads stay in the browser as normal.
 
@@ -90,7 +103,7 @@ ydm/engine/video_downloader.py yt-dlp finds streams; HTTP streams go through the
 ydm/engine/manager.py          queue, scheduler, retries, speed calc, persistence (downloads.json)
 ydm/engine/hosts.py            per-server connection limits learned from 429/503
 ydm/gui/                       main window, dialogs, list model + meter, widgets, icons, theme
-extension/                     Chrome/Edge MV3 extension (background, content button, popup)
+extension/                     MV3 extension for Chromium browsers and Firefox (background, content button, popup)
 ```
 
 Data lives in `%APPDATA%\YDM` (`settings.json`, `downloads.json`, `hosts.json`, `tools\`). Unfinished files are saved as `name.ext.ydm` next to the final file.

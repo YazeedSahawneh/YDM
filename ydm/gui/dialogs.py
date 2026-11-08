@@ -9,12 +9,12 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox,
                                QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
                                QPushButton, QRadioButton, QSpinBox, QStackedWidget, QTimeEdit, QVBoxLayout, QWidget)
 
-from .. import startup, tools, updater, vault
+from .. import browsers, startup, tools, updater, vault
 from ..config import APP_NAME, APP_VERSION, UPDATE_REPO, Settings
 from ..engine import Status
 from ..engine.auth import LOGINS
-from ..utils import human_size
-from . import hudbar, icons, theme
+from ..utils import human_size, open_path
+from . import frame, hudbar, icons, theme
 
 VIDEO_SITES = ("youtube.com", "youtu.be", "vimeo.com", "tiktok.com", "instagram.com", "facebook.com",
                "fb.watch", "x.com", "twitter.com", "dailymotion.com", "twitch.tv", "reddit.com",
@@ -49,8 +49,13 @@ def find_urls(text: str) -> list[str]:
     return out
 
 
-class Dialog(QDialog):
-    """Base: dark title bar, consistent margins."""
+class Dialog(frame.Frameless, QDialog):
+    """Base: YDM's own title bar (title + close), consistent margins."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.titlebar = frame.TitleBar(self, height=32, maximize=False, minimize=False, ground="BG")
+        self.install_title_bar(self.titlebar, overlay=True)
 
     def showEvent(self, event):
         theme.apply_window_chrome(self)
@@ -447,7 +452,11 @@ class SettingsDialog(Dialog):
         self.window_box = QCheckBox("Show a small window for each download (progress, then Open / Open folder)")
         self.window_box.setChecked(settings.progress_window)
         gf.addRow("", self.window_box)
-        self.notify_box = QCheckBox("Notify when a download finishes")
+        self.finish_box = QCheckBox("When a download finishes, show its window (Open / Open folder)")
+        self.finish_box.setChecked(settings.finish_window)
+        self.finish_box.setToolTip("Off: the window closes by itself when the download is done")
+        gf.addRow("", self.finish_box)
+        self.notify_box = QCheckBox("Windows notification when a download fails")
         self.notify_box.setChecked(settings.notify_on_complete)
         gf.addRow("", self.notify_box)
         self.clip_box = QCheckBox("Offer to download links I copy")
@@ -509,12 +518,29 @@ class SettingsDialog(Dialog):
         self.port.setRange(1024, 65535)
         self.port.setValue(settings.port)
         bf.addRow("Extension port", self.port)
-        how = QLabel("Install it once: open chrome://extensions (or edge://extensions), turn on Developer mode, "
-                     "click Load unpacked and pick the extension folder. Start menu → YDM browser extension "
-                     "folder opens it.")
-        how.setObjectName("muted")
-        how.setWordWrap(True)
-        bf.addRow(how)
+        found = browsers.installed()
+        brow = QHBoxLayout()
+        brow.setSpacing(6)
+        self.browser_buttons = []
+        for name, program, page, how_to in found:
+            btn = QPushButton(name)
+            btn.setToolTip(f"Opens {name}'s extensions page and the extension folder. {how_to}")
+            btn.clicked.connect(lambda _=False, p=program, u=page, n=name, h=how_to: self._add_to_browser(p, u, n, h))
+            brow.addWidget(btn)
+            self.browser_buttons.append(btn)
+        folder = icons.put(QPushButton(" Extension folder"), "folder", "text", 16)
+        folder.clicked.connect(lambda: open_path(str(browsers.extension_dir())))
+        brow.addWidget(folder)
+        brow.addStretch(1)
+        bf.addRow("Add it to", brow)
+        self.browser_how = QLabel("Pick your browser: YDM opens its extensions page and the extension folder. "
+                                  "Chrome, Edge, Brave, Opera: turn on Developer mode, click Load unpacked, pick the "
+                                  "folder. Firefox: Load Temporary Add-on…, pick manifest.json in the folder (for "
+                                  "good: YDM-Firefox.xpi from the release page, then about:addons → ⚙ → Install "
+                                  "Add-on From File).")
+        self.browser_how.setObjectName("muted")
+        self.browser_how.setWordWrap(True)
+        bf.addRow(self.browser_how)
 
         # Video
         v, vf = self._page("Video", "YDM uses yt-dlp to find the video on a page, then downloads it with its "
@@ -841,6 +867,16 @@ class SettingsDialog(Dialog):
                                       + ". Without them videos stop at 720p, YouTube may fail and "
                                         "photos from social sites can't be saved.")
 
+    def _add_to_browser(self, program: str, page: str, name: str, how_to: str):
+        try:
+            browsers.open_extensions_page(program, page)
+        except OSError as exc:
+            self.browser_how.setText(f"Couldn't start {name}: {exc}")
+            return
+        open_path(str(browsers.extension_dir()))
+        self.browser_how.setText(f"{name}: {how_to}  The folder is open in Explorer: "
+                                 f"{browsers.extension_dir()}")
+
     def _browse(self):
         d = QFileDialog.getExistingDirectory(self, "Download folder", self.dir_edit.text())
         if d:
@@ -857,6 +893,7 @@ class SettingsDialog(Dialog):
             except OSError:
                 pass
         s.notify_on_complete = self.notify_box.isChecked()
+        s.finish_window = self.finish_box.isChecked()
         s.watch_clipboard = self.clip_box.isChecked()
         s.connections = self.conn.value()
         s.auto_connections = self.auto_conn.isChecked()

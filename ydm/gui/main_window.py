@@ -10,16 +10,15 @@ import webbrowser
 from PySide6.QtCore import QItemSelectionModel, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-                               QLineEdit,
-                               QMainWindow,
-                               QMenu, QMessageBox, QSizePolicy, QSplitter, QSystemTrayIcon, QTableView, QToolBar,
-                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+                               QLineEdit, QMainWindow, QMenu, QMenuBar, QMessageBox, QPushButton, QSizePolicy,
+                               QSplitter, QSystemTrayIcon, QTableView, QToolBar, QTreeWidget, QTreeWidgetItem,
+                               QVBoxLayout, QWidget)
 
 from .. import tools, updater
 from ..config import APP_NAME, APP_TITLE, APP_VERSION, CATEGORY_NAMES, UPDATE_REPO, Settings, is_downloadable_url
 from ..engine import DownloadManager, Status, gallery
 from ..utils import human_speed, open_path, reveal_in_folder
-from . import hudbar, icons, theme
+from . import frame, hudbar, icons, theme
 from .dialogs import (BatchDialog, CountdownDialog, LoginDialog, MirrorsDialog, RenewDialog, SettingsDialog,
                       find_urls)
 from .download_window import DownloadWindow
@@ -31,7 +30,7 @@ SIDEBAR_ICONS = {"All downloads": "all", "Downloading": "speed", "Unfinished": "
                  "Finished": "finished", "Queued": "queued"}
 
 
-class MainWindow(QMainWindow):
+class MainWindow(frame.Frameless, QMainWindow):
     browser_request = Signal(dict)       # emitted from the local server thread
     item_event = Signal(str, str)        # (event, item_id) from engine threads
     bg_progress = Signal(str, float)     # (job, 0..1 or -1) from maintenance threads
@@ -51,6 +50,10 @@ class MainWindow(QMainWindow):
         self._manual_ytdlp = False
         self.when_done = "nothing"
         self._windows: set[DownloadWindow] = set()
+        self._watched: set[str] = set()     # downloads whose window was hidden: it comes back when they finish
+        self._compact = False
+        self._full_geometry = None
+        self._missing_banner = False
         self.setWindowTitle(APP_TITLE)
         self.setWindowIcon(theme.app_icon())
         self.resize(1240, 760)
@@ -61,6 +64,8 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_body()
         self._build_tray()
+        if settings.compact_view:
+            self.set_compact(True)
 
         self.browser_request.connect(self.handle_browser_request)
         self.item_event.connect(self._on_item_event)
@@ -102,6 +107,8 @@ class MainWindow(QMainWindow):
         self.a_delete = self._act("Delete", lambda: self.delete_selected(False), "delete", "Del")
         self.a_delete_done = self._act("Clear finished", self.clear_finished, "delete_done",
                                        tip="Remove finished downloads from the list (files stay)")
+        self.a_clear_missing = self._act("Clear missing", self.clear_missing, "missing",
+                                         tip="Remove downloads whose file was deleted or moved")
         self.a_queue_start = self._act("Start queue", self.start_queue, "queue")
         self.a_queue_stop = self._act("Stop queue", self.stop_queue, "queue_stop")
         self.a_scheduler = self._act("Scheduler", lambda: self.open_settings(2), "scheduler")
@@ -111,9 +118,19 @@ class MainWindow(QMainWindow):
         self.a_details.setShortcut(QKeySequence("F9"))
         self.a_details.toggled.connect(self._toggle_details)
         self.addAction(self.a_details)
+        self.a_compact = QAction("Compact view", self, checkable=True, checked=False)
+        self.a_compact.setShortcut(QKeySequence("Ctrl+M"))
+        self.a_compact.toggled.connect(self.set_compact)
+        self.addAction(self.a_compact)
 
     def _build_menus(self):
-        mb = self.menuBar()
+        # the menus live in YDM's own title bar (frame.py), not in a strip of their own
+        mb = self.menubar = QMenuBar()
+        mb.setObjectName("captionMenu")
+        self.titlebar = frame.TitleBar(self, show_title=False)
+        self.titlebar.add(mb)
+        self.setMenuWidget(self.titlebar)
+        self.install_title_bar(self.titlebar, overlay=False)
         tasks = mb.addMenu("&Tasks")
         tasks.addAction(self.a_add)
         tasks.addAction(self.a_video)
@@ -122,7 +139,8 @@ class MainWindow(QMainWindow):
         tasks.addAction("Exit", self.quit, QKeySequence("Ctrl+Q"))
 
         dl = mb.addMenu("&Downloads")
-        for a in (self.a_resume, self.a_stop, self.a_stop_all, self.a_delete, self.a_delete_done):
+        for a in (self.a_resume, self.a_stop, self.a_stop_all, self.a_delete, self.a_delete_done,
+                  self.a_clear_missing):
             dl.addAction(a)
         dl.addSeparator()
         dl.addAction(self.a_queue_start)
@@ -139,6 +157,7 @@ class MainWindow(QMainWindow):
             done.addAction(a)
 
         view = mb.addMenu("&View")
+        view.addAction(self.a_compact)
         view.addAction(self.a_details)
         self.a_toolbar_text = QAction("Toolbar labels", self, checkable=True, checked=True)
         self.a_toolbar_text.toggled.connect(lambda on: self.toolbar.setToolButtonStyle(
@@ -218,7 +237,7 @@ class MainWindow(QMainWindow):
         self.sidebar.setCurrentItem(root)
         self.sidebar.currentItemChanged.connect(self._filter_changed)
 
-        side = QWidget()
+        side = self.side = QWidget()
         side.setObjectName("panel")
         side.setFixedWidth(220)
         sl = QVBoxLayout(side)
@@ -276,6 +295,7 @@ class MainWindow(QMainWindow):
         ll.setContentsMargins(0, 0, 0, 0)
         ll.setSpacing(0)
         ll.addWidget(self.banner)
+        ll.addWidget(self._build_list_head())
         ll.addWidget(self.table, 1)
         ll.addWidget(self.empty, 1)
 
@@ -301,6 +321,80 @@ class MainWindow(QMainWindow):
         self.status_right = QLabel("")
         self.statusBar().addWidget(self.status_text, 1)
         self.statusBar().addPermanentWidget(self.status_right)
+
+    def _build_list_head(self) -> QWidget:
+        """The strip right above the list: what it shows, and the view switch."""
+        head = QWidget()
+        head.setObjectName("listhead")
+        hl = QHBoxLayout(head)
+        hl.setContentsMargins(14, 5, 8, 5)
+        hl.setSpacing(4)
+        self.list_title = QLabel("All downloads")
+        self.list_title.setObjectName("listTitle")
+        self.list_count = QLabel("")
+        self.list_count.setObjectName("muted")
+        self.list_count.setFont(theme.number_font(9))
+
+        def flat(text, icon, tip, slot):
+            b = icons.put(QPushButton(text), icon, "accent_ink", 15)
+            b.setObjectName("flat")
+            b.setToolTip(tip)
+            b.setCursor(Qt.PointingHandCursor)
+            b.clicked.connect(slot)
+            return b
+        self.btn_add_c = flat(" Add", "add", "Add a link (Ctrl+N)", lambda: self.add_url())
+        self.btn_missing = flat("", "missing", "Remove downloads whose file was deleted or moved from the list",
+                                self.clear_missing)
+        self.btn_view = flat(" Compact", "compact", "", lambda: self.a_compact.toggle())
+        self.btn_add_c.hide()
+        self.btn_missing.hide()
+        hl.addWidget(self.list_title)
+        hl.addSpacing(6)
+        hl.addWidget(self.list_count)
+        hl.addStretch(1)
+        for b in (self.btn_add_c, self.btn_missing, self.btn_view):
+            hl.addWidget(b)
+        self._view_button()
+        return head
+
+    def _view_button(self):
+        on = self._compact
+        self.btn_view.setText(" Full view" if on else " Compact")
+        icons.put(self.btn_view, "expand" if on else "compact", "accent_ink", 15)
+        self.btn_view.setToolTip("Back to the full window (Ctrl+M)" if on else
+                                 "Compact view: just your downloads, in a small window (Ctrl+M)")
+
+    def set_compact(self, on: bool):
+        """A small window with only the list (name, progress, speed, status), or the full one back."""
+        on = bool(on)
+        if on != self.a_compact.isChecked():
+            self.a_compact.setChecked(on)                # comes back here through toggled
+            return
+        if on == self._compact:
+            return
+        self._compact = on
+        if on:
+            self._full_geometry = self.saveGeometry()
+            if self.isMaximized():
+                self.showNormal()
+        for w in (self.side, self.toolbar, self.statusBar(), self.menubar):
+            w.setVisible(not on)
+        self.details.setVisible(not on and self.settings.details_visible)
+        for col in (COL_SIZE, COL_ETA, COL_ADDED):
+            self.table.setColumnHidden(col, on)
+        self.table.setColumnWidth(COL_PROGRESS, 170 if on else 230)
+        self.btn_add_c.setVisible(on)
+        self._view_button()
+        if on:
+            self.resize(680, 420)
+        elif self._full_geometry is not None:
+            self.restoreGeometry(self._full_geometry)
+        else:
+            self.resize(1240, 760)
+        if self.settings.compact_view != on:
+            self.settings.compact_view = on
+            self.settings.save()
+        self.refresh()
 
     def _build_tray(self):
         self.tray = QSystemTrayIcon(theme.app_icon(), self)
@@ -355,6 +449,15 @@ class MainWindow(QMainWindow):
         self.a_queue_start.setEnabled(not self.manager.queue_running)
         self.a_queue_stop.setEnabled(self.manager.queue_running)
         self.tray.setToolTip(f"{APP_NAME}: {active} downloading" + (f", {human_speed(speed)}" if speed else ""))
+        missing = sum(1 for i in items if i.missing)
+        self.a_clear_missing.setEnabled(missing > 0)
+        self.btn_missing.setVisible(missing > 0)
+        if missing:
+            self.btn_missing.setText(f" Clear {missing} missing")
+        shown = len(self.model.ids)
+        self.list_count.setText(str(shown) if shown else "")
+        summary = f"{APP_NAME}   ·   {active} downloading" + (f"   ·   {human_speed(speed)}" if speed else "")
+        self.titlebar.label.setText(summary if self._compact else "")
 
         counts = {name: 0 for name in self._tree_items}
         for i in items:
@@ -382,6 +485,7 @@ class MainWindow(QMainWindow):
         if current is None:
             return
         self.model.filter_name = current.data(0, Qt.UserRole)
+        self.list_title.setText(self.model.filter_name)
         self.model.refresh(force=True)
 
     def _search_changed(self, text: str):
@@ -389,7 +493,7 @@ class MainWindow(QMainWindow):
         self.model.refresh(force=True)
 
     def _toggle_details(self, on: bool):
-        self.details.setVisible(on)
+        self.details.setVisible(on and not self._compact)
         self.settings.details_visible = on
         self.settings.save()
 
@@ -417,7 +521,7 @@ class MainWindow(QMainWindow):
         """The small per-download window; works while the main window stays hidden."""
         w = DownloadWindow(self, **kwargs)
         self._windows.add(w)
-        w.closed.connect(self._windows.discard)
+        w.closed.connect(self._window_closed)
         if kwargs.get("item_id"):
             # started from the browser's quality menu: stack quietly near the tray, don't steal focus
             area = QGuiApplication.primaryScreen().availableGeometry()
@@ -431,6 +535,15 @@ class MainWindow(QMainWindow):
             w.raise_()
             w.activateWindow()
         return w
+
+    def _window_closed(self, w: DownloadWindow):
+        self._windows.discard(w)
+        item = self.manager.get(w.item_id) if w.item_id else None
+        if item is not None and item.status != Status.COMPLETED and not item.pending:
+            self._watched.add(item.id)               # hidden while it runs: show it again when it's done
+
+    def window_for(self, item_id: str) -> DownloadWindow | None:
+        return next((w for w in self._windows if w.item_id == item_id), None)
 
     def add_batch(self, urls: list[str] | None = None):
         if urls is None:
@@ -562,6 +675,7 @@ class MainWindow(QMainWindow):
             self.banner.hide()
             self.manager.remove(item_id)
             self.refresh()
+        self._missing_banner = True
         self.banner.show_message(f"{item.filename} isn't in {item.save_dir} any more: it was deleted or moved.",
                                  "folder", [("Remove from list", forget, False), ("Dismiss", self.banner.hide, False),
                                             ("Download again", again, True)])
@@ -602,6 +716,16 @@ class MainWindow(QMainWindow):
         for item in self.manager.items():
             if item.status == Status.COMPLETED:
                 self.manager.remove(item.id)
+        self.refresh()
+
+    def clear_missing(self):
+        """Take finished downloads whose file was deleted or moved off the list."""
+        gone = [i for i in self.manager.items() if i.missing]
+        for item in gone:
+            self.manager.remove(item.id)
+        if gone and self._missing_banner:
+            self._missing_banner = False
+            self.banner.hide()
         self.refresh()
 
     def start_queue(self):
@@ -648,6 +772,7 @@ class MainWindow(QMainWindow):
             it.setForeground(1, theme.ink("Queued"))
         self.setWindowIcon(theme.app_icon())
         self.tray.setIcon(theme.app_icon())
+        self.titlebar.restyle()
         theme.apply_window_chrome(self)
         for w in list(self._windows):
             w.apply_theme()
@@ -747,13 +872,28 @@ class MainWindow(QMainWindow):
             self._all_done()
             return
         item = self.manager.get(item_id)
-        if not item or not self.settings.notify_on_complete or not self.tray.isVisible():
+        if not item:
             return
         if event == "completed":
-            self.tray.showMessage("Download complete", item.filename, QSystemTrayIcon.Information, 4000)
-        elif event == "error":
+            self._finished(item)                 # YDM's own window, never a second Windows notification
+        elif event == "error" and self.settings.notify_on_complete and self.tray.isVisible():
             self.tray.showMessage("Download failed", f"{item.filename or item.url}\n{item.error}",
                                   QSystemTrayIcon.Warning, 5000)
+
+    def _finished(self, item):
+        """A download is done: its open window shows it (or opens the file); a hidden one comes back."""
+        w = self.window_for(item.id)
+        if w is not None:
+            w.finished()
+            return
+        watched = item.id in self._watched
+        self._watched.discard(item.id)
+        if item.open_when_done and item.path and os.path.exists(item.path):
+            item.open_when_done = False
+            self.manager.mark_seen(item.id)
+            open_path(item.path)
+        elif watched and self.settings.progress_window and self.settings.finish_window:
+            self.open_download_window(item_id=item.id)
 
     def _all_done(self):
         action = self.when_done

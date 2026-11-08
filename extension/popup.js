@@ -35,6 +35,17 @@ async function init() {
   });
   if (tab) showMedia(tab.id);
   check();
+  access();
+}
+
+// Firefox lets people install an add-on without its site access: ask for it here (Chrome grants it at install)
+async function access() {
+  const all = { origins: ["<all_urls>"] };
+  if (!chrome.permissions || await chrome.permissions.contains(all)) return;
+  $("access").classList.add("show");
+  $("allow").addEventListener("click", async () => {
+    if (await chrome.permissions.request(all)) $("access").classList.remove("show");
+  });
 }
 
 async function showMedia(tabId) {

@@ -1,5 +1,7 @@
-// YDM Integration — hands downloads and videos from Chrome/Edge to the YDM desktop app.
-// If YDM isn't running, the browser keeps the download as usual.
+// YDM Integration — hands downloads and videos from Chrome, Edge, Brave, Opera and Firefox to the YDM
+// desktop app. If YDM isn't running, the browser keeps the download as usual.
+// One file for every browser: Chromium runs it as a service worker, Firefox as an event page
+// (manifest "background" lists both); Firefox answers to the chrome.* names too.
 
 const DEFAULTS = { enabled: true, videoButton: true, imageButton: true, port: 9614, minSizeKB: 0, skipExt: "" };
 const bypass = new Set();          // URLs we deliberately give back to the browser
@@ -105,7 +107,8 @@ chrome.webRequest.onResponseStarted.addListener((d) => {
   if (!isManifest && (!MEDIA_TYPES.test(type) || FRAGMENT.test(d.url) || (size && size < 512 * 1024))) return;
   const name = decodeURIComponent(new URL(d.url).pathname.split("/").pop() || host);
   remember(d.tabId, {
-    url: d.url, name, size, type, kind: isManifest ? "video" : "file", page: d.initiator || "",
+    url: d.url, name, size, type, kind: isManifest ? "video" : "file",
+    page: d.initiator || d.documentUrl || d.originUrl || "",          // Chromium || Firefox
   });
 }, { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other"] }, ["responseHeaders"]);
 

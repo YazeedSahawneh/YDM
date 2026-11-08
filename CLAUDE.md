@@ -1,6 +1,6 @@
 # YDM — project guide for Claude
 
-YDM is a personal IDM-style download manager for **Windows**: a Python/PySide6 desktop app plus a Chrome/Edge MV3 extension. It's built from scratch (no IDM code or reverse engineering) and is Yazeed's personal project.
+YDM is a personal IDM-style download manager for **Windows**: a Python/PySide6 desktop app plus an MV3 extension for Chromium browsers (Chrome, Edge, Brave, Opera) and Firefox. It's built from scratch (no IDM code or reverse engineering) and is Yazeed's personal project.
 
 ## Run, test, build
 
@@ -35,6 +35,8 @@ ydm/engine/ftp_downloader.py    FTP/FTPS on the same segment engine (one session
 ydm/engine/auth.py              logins: AutoAuth (Basic/Digest/NTLM via pyspnego), SiteLogins (logins.json)
 ydm/engine/gallery.py           photos/posts from social sites: gallery-dl.exe -J lists them, the engine downloads them
 ydm/startup.py                  start with Windows: HKCU Run + StartupApproved (the same switch as Task Manager)
+ydm/browsers.py                 installed browsers (App Paths) and their extensions pages, the extension folder
+ydm/gui/frame.py                YDM's own window edges: TitleBar + Frameless mixin (WM_NCCALCSIZE / WM_NCHITTEST)
 ydm/vault.py                    passwords at rest: DPAPI on Windows (base64 elsewhere, tests only)
 installer/YDM.iss               Inno Setup script (per-user install, shortcuts, optional start-with-Windows)
 ydm/gui/download_window.py      IDM-style small window per download: pre-start → choose → progress → done
@@ -79,7 +81,13 @@ A link from the browser or Add URL starts downloading immediately as a `pending`
 `item.mirrors` (persisted) are other addresses of the same file; `HttpDownloader.sources` holds a `_Source` per server at run time (`[0]` = the item's own address). Mirrors come from the user (`manager.add_mirrors`), from `Link: rel=duplicate` headers on the probe (`_metalink_mirrors`), or from Metalink XML asked for in the background for files ≥ 32 MB (`_ask_metalink`, `_metalink_xml`, size must match). `_check_mirror` compares SAMPLE bytes already on disk with the same range from the mirror before it's used. `_pick_source` gives each new connection to the server with the most room (own `limit`, `cool_until`), weighted by per-connection speed. A source whose link dies is dropped (`_drop` → `_SourceGone`) only while another good one exists; otherwise the old Fatal/expired path stands. Mirrors never get the item's cookies or login (`_mirror_http`). FTP doesn't use mirrors (`supports_mirrors = False`). `item.sources` is a runtime snapshot for the GUI.
 
 ### File missing
-`manager.check_files()` runs on its own thread every 4 s (a vanished network drive can block) and sets the runtime `item.missing` for finished items whose file is gone; `item.label` is what the Status column shows. "Download again" is `manager.restart`.
+`manager.check_files()` runs on its own thread every 4 s (a vanished network drive can block) and sets the runtime `item.missing` for finished items whose file is gone; `item.label` is what the Status column shows. "Download again" is `manager.restart`; *Clear missing* (`MainWindow.clear_missing`) removes them from the list.
+
+### Window edges
+`gui/frame.py`: windows are `Qt.FramelessWindowHint`, then `Frameless._ydm_native_frame` puts `WS_CAPTION | WS_THICKFRAME` back on the HWND (on every show: Qt resets styles when window flags change), so Windows still draws the shadow and rounded corners and does Snap and resizing. `nativeEvent` answers `WM_NCCALCSIZE` (whole window = client area; when maximised, clamp to the monitor's work area) and `WM_NCHITTEST` (resize edges, `HTCAPTION` where `TitleBar.drags()`). Classes list `frame.Frameless` first: `MainWindow(frame.Frameless, QMainWindow)`, `DownloadWindow`, `dialogs.Dialog`. The main window's `TitleBar` is its `setMenuWidget` and holds the `QMenuBar` (in a container: a QMenuBar stretches to its parent's width), so never call `self.menuBar()` (it would replace the title bar). Off Windows the system frame stays and the bar only hosts the menus.
+
+### Finish window
+The engine's "completed" event goes to `MainWindow._finished`: an open `DownloadWindow` handles it (`finished()`: auto-confirms a pending file that finished before Start, opens the file if `item.open_when_done`, else shows the finish screen or closes itself when `Settings.finish_window` is off). A window hidden while its download ran (`_watched`) is opened again finished. There's no Windows notification for finished downloads (only `notify_on_complete` for failures). `item.open_when_done` is one-shot: whoever opens the file clears it.
 
 ### Photos and posts
 `gallery.fetch_media_info()` runs yt-dlp and (for `SOCIAL` hosts, or when yt-dlp finds nothing) gallery-dl side by side; a post with photos gets an extra quality-list entry whose format is `gallery.OPTION` ("gallery"). Choosing it calls `MainWindow.save_post()` → `gallery.take()` (the cached listing; signed links expire) → `manager.add_gallery()`, one queued item per file (`ytdl:` entries become video items). gallery-dl is a separate program in `tools\` (GPL, so it's not bundled into the exe). Its GitHub releases carry no files any more: `tools._install_gallery_dl` takes the newest stable `gallery-dl.exe` from Codeberg's API, falls back to the official nightly build (gdl-org/builds), and keeps the first copy that runs `--version`; the dev venv's `gallery-dl.exe` is found too (`pip install gallery-dl`, test-only). The page's cookies go to gallery-dl as a temporary cookies.txt and are only forwarded to media URLs on the same site.
@@ -111,4 +119,4 @@ The UI follows the direction in `PRODUCT.md` / `DESIGN.md`: studio-rack hi-fi, g
 - Auto connections: also probe *down* (fewer connections) on servers that slow down with many
 - Digest/NTLM proxy authentication (only Basic and SOCKS5 user/password today); FTP through a proxy
 - Playlist download for the video grabber
-- Publish the extension to the Chrome Web Store / Edge Add-ons (needs a developer account)
+- Publish the extension to the Chrome Web Store / Edge Add-ons / addons.mozilla.org (needs developer accounts)

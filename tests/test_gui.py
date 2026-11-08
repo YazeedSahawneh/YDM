@@ -25,14 +25,25 @@ class H(BaseHTTPRequestHandler):
         body = DATA[a:b+1]
         self.send_header("Content-Length", str(len(body))); self.end_headers()
         try:
+            pause = 0.1 if "/slow/" in self.path else 0.02       # /slow/: still running when the test looks
             for i in range(0, len(body), 128*1024):
-                self.wfile.write(body[i:i+128*1024]); time.sleep(0.02)
+                self.wfile.write(body[i:i+128*1024]); time.sleep(pause)
         except OSError: pass
 srv = ThreadingHTTPServer(("127.0.0.1", 0), H); threading.Thread(target=srv.serve_forever, daemon=True).start()
 base = f"http://127.0.0.1:{srv.server_port}"
 
 def pump(sec):
     loop = QEventLoop(); QTimer.singleShot(int(sec*1000), loop.quit); loop.exec()
+
+# 1.6: the old default folder (Downloads\YDM, sorted by category) becomes Downloads itself; a folder the user picked stays
+from ydm.config import OLD_DEFAULT_DIR, default_download_dir
+Settings(download_dir=str(OLD_DEFAULT_DIR), use_category_folders=True).save()
+mig = Settings.load()
+assert mig.download_dir == str(default_download_dir()) and not mig.use_category_folders and mig.layout_version == 1
+Settings(download_dir=os.path.join("D:" + os.sep, "Mine"), use_category_folders=True).save()
+keep = Settings.load(); assert keep.download_dir.endswith("Mine") and keep.use_category_folders and keep.layout_version == 1
+os.remove(Settings.path())
+assert Settings().download_dir == str(default_download_dir()) and not Settings().use_category_folders
 
 app = QApplication(sys.argv); app.setStyle("Fusion"); app.setStyleSheet(theme.QSS)
 s = Settings(download_dir=os.path.join(os.environ["APPDATA"], "dl"), show_add_dialog=False)
@@ -61,7 +72,7 @@ print([ (i.filename, i.status, f"{i.progress:.0%}") for i in m.items()])
 w.grab().save(f"{out}/running.png")
 
 # IDM-style pre-start: the window opens and the file is already downloading before "Start"
-d = w.open_download_window(url=base + "/file.zip"); pump(1.5)
+d = w.open_download_window(url=base + "/slow/file.zip"); pump(1.5)
 pre = m.get(d.item_id)
 print("prestart:", d.live.text(), "| placeholder:", d.name_edit.placeholderText())
 assert pre and pre.pending and pre.downloaded > 0, "did not start before confirming"
@@ -77,10 +88,65 @@ for _ in range(60):
 assert pre.filename == "renamed.zip" and os.path.exists(pre.path), (pre.status, pre.filename)
 pump(0.4); d.grab().save(f"{out}/done.png"); d.close()
 # cancelling a pre-started download removes it and its partial file
-c = w.open_download_window(url=base + "/other.iso"); pump(1.0)
+c = w.open_download_window(url=base + "/slow/other.iso"); pump(1.0)
 cid = m.get(c.item_id); part = cid.part_path; c.close(); pump(1.5)
 assert m.get(cid.id) is None and not os.path.exists(part), "cancel left something behind"
 print("prestart / confirm / rename / cancel OK")
+
+def wait_for(cond, sec=20):
+    for _ in range(int(sec / 0.25)):
+        if cond(): return True
+        pump(0.25)
+    return cond()
+
+# a file that finishes before Start is pressed: the window moves on to "Download complete" by itself
+q = w.open_download_window(url=base + "/quick.bin")
+assert wait_for(lambda: q.pages.currentIndex() == 1), "the window waited for Start on a finished file"
+qi = m.get(q.item_id); pump(0.3)
+assert qi.status == Status.COMPLETED and not qi.pending, (qi.status, qi.pending)
+assert wait_for(lambda: qi.id in w.model.ids, 2), "confirmed download isn't in the list"
+assert q.quiet_box.isVisible() and not q.open_box_p.isVisible(), "finish screen controls"
+assert q.titlebar.label.text() == "Download complete" and q.windowTitle() == "quick.bin", q.titlebar.label.text()
+q.grab().save(f"{out}/auto-done.png")
+# "Don't show this window when a download finishes": the next window closes by itself once it's done
+q.quiet_box.setChecked(True); assert s.finish_window is False; q.close()
+q2 = w.open_download_window(url=base + "/quick2.bin")
+assert wait_for(lambda: q2 not in w._windows), "window stayed although finish_window is off"
+s.finish_window = True
+# Open when done: the file opens and the window gets out of the way
+import ydm.gui.download_window as dwm, ydm.gui.main_window as mwm
+opened = []; real_open = dwm.open_path; dwm.open_path = mwm.open_path = opened.append
+q3 = w.open_download_window(url=base + "/quick3.bin"); q3.open_box.setChecked(True)
+assert m.get(q3.item_id).open_when_done and q3.open_box_p.isChecked()
+assert wait_for(lambda: q3 not in w._windows) and len(opened) == 1 and opened[0].endswith("quick3.bin"), opened
+# a window hidden while its download runs comes back when it's done; no Windows notification on the side
+toasts = []; real_toast = w.tray.showMessage; w.tray.showMessage = lambda *a: toasts.append(a)
+h = w.open_download_window(url=base + "/slow/hidden.bin"); pump(0.4); h._start(True); hid = h.item_id; h.close()
+assert w.window_for(hid) is None and hid in w._watched
+assert wait_for(lambda: w.window_for(hid) is not None, 30), "finished download's window didn't come back"
+back = w.window_for(hid); pump(0.3)
+assert back.pages.currentIndex() == 1 and back.btn_open.isVisible() and not toasts, toasts
+back.close()
+# hidden + Open when done: no window, the file just opens
+h2 = w.open_download_window(url=base + "/slow/hidden2.bin"); pump(0.3); h2.open_box.setChecked(True)
+h2._start(True); hid2 = h2.item_id; h2.close()
+assert wait_for(lambda: m.get(hid2).status == Status.COMPLETED, 30); pump(0.5)
+assert w.window_for(hid2) is None and opened[-1].endswith("hidden2.bin"), opened
+dwm.open_path = mwm.open_path = real_open; w.tray.showMessage = real_toast
+# compact view: the list only, in a small window; the button above the list brings the full one back
+w.btn_view.click(); pump(0.3)
+assert w._compact and s.compact_view and not w.side.isVisible() and not w.toolbar.isVisible()
+from ydm.gui.models import COL_SIZE, COL_SPEED
+assert w.table.isColumnHidden(COL_SIZE) and not w.table.isColumnHidden(COL_SPEED) and w.btn_add_c.isVisible()
+assert "downloading" in w.titlebar.label.text(); w.grab().save(f"{out}/compact.png")
+w.btn_view.click(); pump(0.2)
+assert not w._compact and not s.compact_view and w.side.isVisible() and not w.table.isColumnHidden(COL_SIZE)
+# Clear missing: finished downloads whose file was deleted leave the list (others stay)
+gone = m.get(hid); os.remove(gone.path); m.check_files(); w.refresh()
+assert w.btn_missing.isVisible() and "1 missing" in w.btn_missing.text() and w.a_clear_missing.isEnabled()
+w.grab().save(f"{out}/missing.png")
+w.clear_missing(); assert m.get(hid) is None and m.get(hid2) is not None and not w.btn_missing.isVisible()
+print("finish window / open when done / compact view / clear missing OK")
 sd = SettingsDialog(s, w, 2); sd.show(); pump(0.3); sd.grab().save(f"{out}/settings.png"); sd.close()
 w.sidebar.setCurrentItem(w._tree_items["Downloading"]); pump(0.6); print("Downloading filter rows:", len(w.model.ids))
 w.sidebar.setCurrentItem(w._tree_items["All downloads"])
@@ -137,14 +203,14 @@ w.apply_theme(s.accent, s.signal, s.bar_colors, "dark"); assert theme.MODE == "d
 newdir = os.path.join(os.environ["APPDATA"], "moved"); m.rename(pre.id, "final-name.zip", newdir)
 assert pre.path == os.path.join(newdir, "final-name.zip") and os.path.exists(pre.path), pre.path
 # remember this folder: the next downloads go there
-rw = w.open_download_window(url=base + "/remember.bin"); pump(0.6)
+rw = w.open_download_window(url=base + "/slow/remember.bin"); pump(0.6)
 rw.dir_edit.setText(os.path.join(os.environ["APPDATA"], "always")); rw.remember_box.setChecked(True); rw._start(True)
 assert s.remember_dir.endswith("always") and m.resolve_dir(pre) == s.remember_dir
 # running download: Later parks it (paused, in the list); Cancel removes it
 pump(0.2); rw.close(); s.remember_dir = ""
 # a server asking for a login: the download window shows the login row
 from ydm.engine.item import LOGIN_NEEDED
-lw = w.open_download_window(url=base + "/needs-login.bin"); pump(1.0)
+lw = w.open_download_window(url=base + "/slow/needs-login.bin"); pump(1.0)
 li = m.get(lw.item_id); m.pause(li.id); m._wait_stopped(li.id)          # stand in for a server's 401
 li.status, li.error = Status.ERROR, f"{LOGIN_NEEDED}: enter a user name and password"
 pump(0.4); assert lw.form.isRowVisible(4), "login row didn't appear"; lw.grab().save(f"{out}/login.png"); lw.close()

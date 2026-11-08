@@ -73,6 +73,7 @@ class DownloadItem:
     auth_user: str = ""                # login for this download (Basic / Digest / NTLM / FTP)
     auth_pass: str = ""                # protected with vault.protect (DPAPI on Windows)
     mirrors: list = field(default_factory=list)  # other addresses of the same file (pieces come from all)
+    open_when_done: bool = False       # open the file as soon as it's finished (ticked in its window)
     # runtime only
     speed: float = 0.0
     eta: float = -1.0

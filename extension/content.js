@@ -35,18 +35,20 @@
       .chev { width: 10px; height: 10px; opacity: .7; transition: transform .15s; }
       .open .chev { transform: rotate(180deg); }
       svg.logo { width: 16px; height: 16px; }
-      .menu { display: none; width: 270px; padding: 5px; border-radius: 8px; background: #191C20;
-        border: 1px solid #2C3137; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); max-height: 360px; overflow: auto; }
+      .menu { display: none; width: min(270px, calc(100vw - 12px)); padding: 5px; border-radius: 8px; background: #191C20;
+        border: 1px solid #2C3137; box-shadow: 0 10px 30px rgba(0, 0, 0, .45); max-height: 360px;
+        overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; }
       .menu.show { display: block; }
       .head { padding: 7px 9px 6px; font-size: 11px; font-weight: 600; letter-spacing: .9px; text-transform: uppercase;
         color: #969BA2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
       .opt { all: unset; box-sizing: border-box; width: 100%; display: flex; justify-content: space-between; gap: 12px;
         padding: 8px 10px; border-radius: 5px; cursor: pointer; }
       .opt:hover, .opt:focus-visible { background: #22262B; }
-      .opt .size { color: #969BA2; font-variant-numeric: tabular-nums; }
+      .opt > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .opt .size { flex: none; white-space: nowrap; color: #969BA2; font-variant-numeric: tabular-nums; }
       .opt.sent .size { color: #A6E35A; }
       .sep { height: 1px; background: #2C3137; margin: 5px 6px; }
-      .note { padding: 9px 10px; color: #969BA2; font-size: 12px; }
+      .note { padding: 9px 10px; color: #969BA2; font-size: 12px; overflow-wrap: anywhere; }
       .note.err { color: #FF6B5E; }
       .more { color: #FFB547; }
       .scan { display: flex; gap: 3px; padding: 4px 10px 10px; }
@@ -131,8 +133,12 @@
     if (!current || !current.isConnected) return hide();
     const r = current.getBoundingClientRect();
     if (r.width < 200 || r.height < 110 || r.bottom < 0 || r.top > innerHeight) return hide();
-    host.style.left = `${Math.max(4, Math.min(innerWidth - 284, r.right - 280))}px`;
-    host.style.top = `${Math.max(4, r.top + 10)}px`;
+    // keep the button and its menu inside the window: never wider than it, never past its edges
+    const w = Math.min(280, innerWidth - 8);
+    const top = Math.max(4, r.top + 10);
+    host.style.left = `${Math.max(4, Math.min(innerWidth - w - 4, r.right - w))}px`;
+    host.style.top = `${top}px`;
+    menu.style.maxHeight = `${Math.max(120, Math.min(360, innerHeight - top - 48))}px`;
     host.style.display = "block";
   }
   function hide() { host.style.display = "none"; menu.classList.remove("show"); button.classList.remove("open"); current = null; }

@@ -4,16 +4,15 @@ Upright cells between two brackets. Each cell is one slice of the file and
 lights up as that slice arrives (straight from the real segment map), so you
 see every connection filling its own stretch, with a hot cell where each one
 is writing right now. The whole gauge shifts colour with the percentage, red
-→ amber → yellow → green (or stays in the theme's signal colour). Lit cells
-give off a faint glow, a little stronger where a connection is writing, and
-on the big version a light sweeps across while bytes arrive.
+→ amber → yellow → green (or stays in the theme's signal colour). Flat cells,
+no glow; on the big version a light sweeps across while bytes arrive.
 """
 from __future__ import annotations
 
 import time
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPolygonF, QRadialGradient
+from PySide6.QtGui import QColor, QFont, QPainter, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ..engine import DownloadItem, Status
@@ -68,34 +67,6 @@ def draw_hud_bar(p: QPainter, rect: QRectF, item: DownloadItem | None, *, cell: 
     unknown = item is not None and live and item.total <= 0
 
     p.setPen(Qt.NoPen)
-    # a faint glow: a haze behind the lit stretch, a halo round each lit cell, a bloom at each write head
-    lit_idx = [i for i, c in enumerate(cov) if c > 0.05]
-    glow = 1.0 if live else 0.5
-    if lit_idx and not unknown and st != Status.QUEUED:
-        a, b = x0 + lit_idx[0] * pitch, x0 + lit_idx[-1] * pitch + cell
-        for grow, alpha in ((4.0, 0.05), (2.0, 0.08)):
-            g = QColor(color)
-            g.setAlphaF(alpha * glow)
-            p.setBrush(g)
-            p.drawRoundedRect(QRectF(a - grow, inner.top() - grow, b - a + 2 * grow, h + 2 * grow), 3 + grow, 3 + grow)
-        for i in lit_idx:
-            g = QColor(color)
-            g.setAlphaF(0.12 * glow * cov[i])
-            p.setBrush(g)
-            p.drawRoundedRect(QRectF(x0 + i * pitch - 1.5, inner.top() - 1.5, cell + 3, h + 3), 2.5, 2.5)
-        if live:
-            for i in hot:
-                cx, cy = x0 + i * pitch + cell / 2, inner.center().y()
-                bloom = QRadialGradient(QPointF(cx, cy), h * 0.9)
-                c0 = QColor(color)
-                c0.setAlphaF(0.24)
-                c1 = QColor(color)
-                c1.setAlphaF(0.0)
-                bloom.setColorAt(0.0, c0)
-                bloom.setColorAt(1.0, c1)
-                p.setBrush(bloom)
-                p.drawEllipse(QPointF(cx, cy), h * 0.9, h * 0.9)
-
     unlit = QColor(theme.UNLIT)
     scan = (time.monotonic() * 1.4) % 2 if unknown else 0.0
     scan_pos = (scan if scan <= 1 else 2 - scan) * (n - 1)

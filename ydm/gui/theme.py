@@ -224,6 +224,12 @@ QToolTip {{ background: {RAISED}; color: {TEXT}; border: 1px solid {LINE}; paddi
 QMenuBar {{ background: {PANEL}; border-bottom: 1px solid {LINE}; padding: 2px 4px; }}
 QMenuBar::item {{ background: transparent; padding: 5px 10px; border-radius: 4px; }}
 QMenuBar::item:selected {{ background: {RAISED}; }}
+QMenuBar#captionMenu {{ background: transparent; border: none; padding: 0; }}
+QMenuBar#captionMenu::item {{ padding: 5px 9px; }}
+QLabel#captionTitle {{ font-size: 9pt; }}
+QWidget#listhead {{ background: {BG}; }}
+QLabel#listTitle {{ font-weight: 600; }}
+QCheckBox#muted {{ color: {MUTED}; }}
 QMenu {{ background: {PANEL}; border: 1px solid {LINE}; padding: 5px; }}
 QMenu::item {{ padding: 6px 28px 6px 12px; border-radius: 4px; }}
 QMenu::item:selected {{ background: {RAISED}; }}
@@ -324,7 +330,8 @@ QSS = build_qss()
 
 
 def apply_window_chrome(widget) -> None:
-    """Windows 10/11: title bar in the panel colour (dark or light), matching the app."""
+    """Windows 10/11: the frame in the app's colours (dark/light system parts, the caption colour for
+    windows that keep Windows' title bar, the 1 px Windows 11 border in the hairline colour)."""
     if sys.platform != "win32":
         return
     try:
@@ -336,6 +343,9 @@ def apply_window_chrome(widget) -> None:
         c = QColor(PANEL)
         colorref = ctypes.c_int(c.red() | (c.green() << 8) | (c.blue() << 16))
         dwm.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(colorref), ctypes.sizeof(colorref))  # caption colour (Win11)
+        e = QColor(EDGE)
+        border = ctypes.c_int(e.red() | (e.green() << 8) | (e.blue() << 16))
+        dwm.DwmSetWindowAttribute(hwnd, 34, ctypes.byref(border), ctypes.sizeof(border))      # border colour (Win11)
     except (OSError, AttributeError):
         pass
 

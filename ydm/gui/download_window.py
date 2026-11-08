@@ -23,12 +23,12 @@ from ..engine import gallery
 from ..engine.gallery import fetch_media_info
 from ..engine.video_downloader import has_ffmpeg
 from ..utils import human_eta, human_size, human_speed, open_path, open_with, reveal_in_folder
-from . import icons, theme
+from . import frame, icons, theme
 from .dialogs import MirrorsDialog, _hairline, _Job, _segment_qss, find_urls, looks_like_video_page
 from .hudbar import HudBar
 
 
-class DownloadWindow(QWidget):
+class DownloadWindow(frame.Frameless, QWidget):
     closed = Signal(object)
 
     def __init__(self, main, *, url: str = "", payload: dict | None = None, kind: str | None = None,
@@ -46,11 +46,15 @@ class DownloadWindow(QWidget):
         self._info: dict | None = None
         self._ticket = 0
         self._jobs: list[_Job] = []
+        self._finish_done = False             # finished() ran (it may come from the engine and from _tick)
         self.setAttribute(Qt.WA_DeleteOnClose)
         self.setWindowIcon(theme.app_icon())
         self.setWindowTitle(APP_NAME)
         self.setMinimumWidth(640)
         self.setStyleSheet(f"DownloadWindow {{ background: {theme.BG}; }}")
+        self.titlebar = frame.TitleBar(self, height=32, maximize=False, ground="BG", show_title=False)
+        self.titlebar.label.setText(APP_NAME)
+        self.install_title_bar(self.titlebar, overlay=True)
 
         # header: what is being downloaded
         self.glyph = QLabel()
@@ -82,7 +86,7 @@ class DownloadWindow(QWidget):
         self.pages.addWidget(self._build_progress())
 
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(22, 18, 22, 18)
+        lay.setContentsMargins(22, 8 if frame.NATIVE else 18, 22, 18)
         lay.setSpacing(12)
         lay.addLayout(head)
         lay.addWidget(self.meter)
@@ -210,6 +214,11 @@ class DownloadWindow(QWidget):
         self.btn_mirrors.setToolTip("Other addresses of the same file: pieces come from all of them at once")
         self.btn_mirrors.clicked.connect(self._mirrors)
         buttons.addWidget(self.btn_mirrors)
+        self.open_box = QCheckBox("Open when done")
+        self.open_box.setToolTip("Open the file as soon as it has finished downloading")
+        self.open_box.toggled.connect(self._open_when_done)
+        buttons.addSpacing(6)
+        buttons.addWidget(self.open_box)
         buttons.addStretch(1)
         buttons.addWidget(cancel)
         buttons.addWidget(self.btn_later)
@@ -310,11 +319,21 @@ class DownloadWindow(QWidget):
         row.addStretch(1)
         for b in (self.btn_save, self.btn_folder, self.btn_hide, self.btn_open):
             row.addWidget(b)
+        self.open_box_p = QCheckBox("Open the file when it's done")
+        self.open_box_p.toggled.connect(self._open_when_done)
+        self.quiet_box = QCheckBox("Don't show this window when a download finishes")
+        self.quiet_box.setToolTip("From now on a download's window closes by itself when it's done "
+                                  "(Options → General turns it back on)")
+        self.quiet_box.toggled.connect(self._quiet)
+        self.quiet_box.setObjectName("muted")
+        self.quiet_box.hide()
         lay = QVBoxLayout(w)
         lay.setContentsMargins(0, 4, 0, 0)
         lay.setSpacing(14)
         lay.addLayout(addr_row)
         lay.addLayout(grid)
+        lay.addWidget(self.open_box_p)
+        lay.addWidget(self.quiet_box)
         lay.addWidget(_hairline())
         lay.addLayout(row)
         return w
@@ -425,7 +444,7 @@ class DownloadWindow(QWidget):
             self.name_edit.setText(name)
             self.dir_edit.setText(folder)
 
-    def _start(self, now: bool):
+    def _start(self, now: bool, auto: bool = False):
         url = self.url_edit.text().strip()
         if self._video():
             current = self.quality.currentItem()
@@ -441,6 +460,7 @@ class DownloadWindow(QWidget):
             item = self.manager.add(url, kind="video", video_format=spec, convert=convert,
                                     save_dir=self.dir_edit.text().strip(), headers=self.headers,
                                     title=(self._info or {}).get("title", ""))
+            item.open_when_done = self.open_box.isChecked()
             self.item_id = item.id
         else:
             if not self.item_id:
@@ -454,7 +474,7 @@ class DownloadWindow(QWidget):
                                  save_dir=self.dir_edit.text().strip(), start=now)
         self._remember_folder()
         self._prestarted_url = ""                    # confirmed: closing no longer cancels it
-        if now and self.settings.progress_window:
+        if now and (self.settings.progress_window or auto):
             self._to_progress()
         else:
             self.close()
@@ -468,6 +488,45 @@ class DownloadWindow(QWidget):
             self.show()
         self._tick()
         self.adjustSize()
+
+    def _open_when_done(self, on: bool):
+        for box in (self.open_box, self.open_box_p):
+            if box.isChecked() != on:
+                box.blockSignals(True)
+                box.setChecked(on)
+                box.blockSignals(False)
+        item = self._item()
+        if item is not None:
+            item.open_when_done = on
+
+    def _quiet(self, on: bool):
+        if self.settings.finish_window == on:
+            self.settings.finish_window = not on
+            self.settings.save()
+
+    def finished(self):
+        """The engine says this download is done (also checked by _tick, whichever comes first)."""
+        item = self._item()
+        if item is None or item.status != Status.COMPLETED or self._finish_done:
+            return
+        if self.pages.currentIndex() == 0:
+            if self._video() or not item.pending:
+                return
+            # it finished before Start was pressed: keep it as the window says now and show the result
+            self._start(True, auto=True)
+            item = self._item()
+            if item is None:
+                return
+        self._finish_done = True
+        if item.open_when_done and item.path and os.path.exists(item.path):
+            item.open_when_done = False                # once: the engine's "completed" may still be on its way
+            self.manager.mark_seen(item.id)
+            open_path(item.path)
+            self.close()
+        elif not self.settings.finish_window:
+            QTimer.singleShot(1200, self.close)        # a moment of "Download complete", then out of the way
+        else:
+            self._tick()
 
     def _remember_folder(self):
         folder = self.dir_edit.text().strip()
@@ -561,6 +620,7 @@ class DownloadWindow(QWidget):
         self.btn_file.setStyleSheet(_segment_qss(0, 2))
         self.btn_video.setStyleSheet(_segment_qss(1, 2))
         self.setStyleSheet(f"DownloadWindow {{ background: {theme.BG}; }}")
+        self.titlebar.restyle()
         theme.apply_window_chrome(self)
         self.meter.update()
         self._tick()
@@ -607,10 +667,30 @@ class DownloadWindow(QWidget):
         size = human_size(item.total) if item.total > 0 else ""
         where = item.dest_dir or item.save_dir
         self.sub.setText("  ·  ".join(x for x in (size, where) if x))
+        self._caption(item, name)
         if self.pages.currentIndex() == 0:
             self._tick_setup(item)
         else:
             self._tick_progress(item)
+
+    def _caption(self, item, name: str):
+        """Title bar and taskbar: how far along it is, at a glance."""
+        known = item.total > 0
+        pct = f"{item.progress * 100:.0f}%" if known else ""
+        if item.status == Status.COMPLETED:
+            bar, title = ("File missing" if item.missing else "Download complete"), name or APP_NAME
+        elif item.status == Status.DOWNLOADING:
+            speed = human_speed(item.speed)
+            bar = "  ·  ".join(x for x in (pct or "Downloading", speed) if x)
+            title = f"{pct} {name}".strip()
+        elif item.status == Status.ERROR:
+            bar, title = "Stopped", name or APP_NAME
+        else:
+            bar, title = item.status, name or APP_NAME
+        if self.titlebar.label.text() != bar:
+            self.titlebar.label.setText(bar)
+        if self.windowTitle() != title:
+            self.setWindowTitle(title)
 
     def _tick_setup(self, item):
         if item.filename and not self.name_edit.text():
@@ -621,7 +701,7 @@ class DownloadWindow(QWidget):
         elif item.status == Status.ERROR:
             self.live.setText(f"Problem: {item.error}")
         elif item.status == Status.COMPLETED:
-            self.live.setText(f"Already finished ({human_size(item.total)}). Press Start to keep it.")
+            self.finished()                           # no need to press Start for a file that's already here
         elif item.downloaded:
             got = f"{human_size(item.downloaded)} of {human_size(item.total)}" if item.total > 0 \
                 else human_size(item.downloaded)
@@ -669,11 +749,16 @@ class DownloadWindow(QWidget):
         else:
             self.live.setText(item.status if item.status != Status.DOWNLOADING else "")
             self.live.setStyleSheet("")
+        self.live.setVisible(bool(self.live.text()))      # no empty line under the bar while it runs
         paused = item.status in (Status.PAUSED, Status.ERROR)
         self.btn_pause.setText(" Resume" if paused else " Pause")
         icons.put(self.btn_pause, "resume" if paused else "pause", "text", 16)
         for b in (self.btn_later_p, self.btn_cancel):
             b.setVisible(not done)
+        self.open_box_p.setVisible(not done)
+        self.quiet_box.setVisible(done and not item.missing)
+        if done and not self._finish_done:
+            self.finished()
         self.btn_with.setVisible(done and not item.missing)
         self.btn_mirrors_p.setVisible(item.kind == "file" and not done
                                       and not item.url.lower().startswith(("ftp://", "ftps://")))
@@ -695,7 +780,8 @@ class DownloadWindow(QWidget):
 
     def closeEvent(self, event):
         self.timer.stop()
-        self._drop_prestart()           # closed without confirming: cancel and clean up
+        if self._prestarted_url:
+            self._drop_prestart()       # closed without confirming: cancel and clean up
         self.closed.emit(self)
         super().closeEvent(event)
 

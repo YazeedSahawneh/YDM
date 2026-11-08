@@ -22,6 +22,10 @@ jobs:
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
       GH_TOKEN: ${{ github.token }}
+      # Firefox only installs add-ons Mozilla has signed. With these two repo secrets (addons.mozilla.org →
+      # Developer Hub → Manage API Keys) each release also gets a signed YDM-Firefox.xpi; without them it's skipped.
+      AMO_JWT_ISSUER: ${{ secrets.AMO_JWT_ISSUER }}
+      AMO_JWT_SECRET: ${{ secrets.AMO_JWT_SECRET }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -55,6 +59,17 @@ jobs:
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$env:VER" installer\YDM.iss
           if (-not (Test-Path "dist\YDM-Setup-$env:VER.exe")) { throw "Installer was not built" }
 
+      - name: Sign the Firefox add-on
+        if: env.AMO_JWT_ISSUER != ''
+        continue-on-error: true          # AMO refuses a version it has signed before: the installer still ships
+        shell: pwsh
+        run: |
+          npx --yes web-ext@8 sign --channel unlisted --source-dir extension --artifacts-dir dist\firefox `
+            --api-key $env:AMO_JWT_ISSUER --api-secret $env:AMO_JWT_SECRET
+          $xpi = Get-ChildItem dist\firefox\*.xpi | Select-Object -First 1
+          if (-not $xpi) { throw "web-ext didn't produce a signed add-on" }
+          Copy-Item $xpi.FullName "dist\YDM-Firefox.xpi"
+
       - name: Attach to the release
         shell: pwsh
         run: |
@@ -70,3 +85,4 @@ jobs:
           }
           gh release upload $env:TAG "dist\YDM-Setup-$env:VER.exe" --clobber
           if ($LASTEXITCODE -ne 0) { throw "Could not attach the installer" }
+          if (Test-Path "dist\YDM-Firefox.xpi") { gh release upload $env:TAG "dist\YDM-Firefox.xpi" --clobber }
