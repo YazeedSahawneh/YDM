@@ -7,7 +7,8 @@ from PySide6.QtCore import QObject, QRectF, QRunnable, QSize, QThreadPool, QTime
 from PySide6.QtGui import QColor, QPainter
 from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog, QFormLayout,
                                QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
-                               QPushButton, QRadioButton, QSpinBox, QStackedWidget, QTimeEdit, QVBoxLayout, QWidget)
+                               QPushButton, QRadioButton, QScrollArea, QSpinBox, QStackedWidget, QTimeEdit,
+                               QVBoxLayout, QWidget)
 
 from .. import browsers, startup, tools, updater, vault
 from ..config import APP_NAME, APP_VERSION, UPDATE_REPO, Settings
@@ -32,6 +33,13 @@ def _segment_qss(index: int, count: int) -> str:
     return (f"QPushButton {{ padding: 6px 12px; {radius} }}"
             f"QPushButton:checked {{ background: {theme.SELECT}; border-color: {theme.ACCENT_INK}; "
             f"color: {theme.ACCENT_INK}; }}")
+
+
+def _card_qss() -> str:
+    """A design card in Options → Appearance: two lines, accent outline when picked."""
+    return (f"QPushButton {{ text-align: left; padding: 8px 12px; }}"
+            f"QPushButton:checked {{ background: {theme.SELECT}; border-color: {theme.ACCENT_INK}; "
+            f"color: {theme.TEXT}; }}")
 
 
 def looks_like_video_page(url: str) -> bool:
@@ -381,12 +389,13 @@ class _Swatch(QPushButton):
 class _BarPreview(QWidget):
     """The progress bar at a few points, in the colours being chosen."""
 
-    STOPS = [(0.08, Status.DOWNLOADING), (0.42, Status.DOWNLOADING), (0.78, Status.DOWNLOADING),
-             (0.55, Status.PAUSED), (1.0, Status.COMPLETED)]
+    STOPS = [(0.12, Status.DOWNLOADING), (0.64, Status.DOWNLOADING), (0.55, Status.PAUSED), (1.0, Status.COMPLETED)]
+
+    ICONS = ("add", "resume", "pause", "folder", "video", "music", "archive", "settings")
 
     def __init__(self):
         super().__init__()
-        self.setFixedHeight(24 * len(self.STOPS))
+        self.setFixedHeight(24 * len(self.STOPS) + 34)
         self._font = theme.number_font(8.5)
 
     def paintEvent(self, _event):
@@ -394,10 +403,13 @@ class _BarPreview(QWidget):
         p.setFont(self._font)
         for i, (frac, status) in enumerate(self.STOPS):
             y = i * 24 + 4
-            color = hudbar.draw_hud_bar(p, QRectF(0, y, self.width() - 110, 14), None, fraction=frac, status=status)
+            color = hudbar.draw_bar(p, QRectF(0, y, self.width() - 110, 14), None, fraction=frac, status=status)
             p.setPen(color)
             label = f"{frac * 100:.0f}%" + ("  paused" if status == Status.PAUSED else "")
             p.drawText(QRectF(self.width() - 100, y - 3, 100, 20), Qt.AlignLeft | Qt.AlignVCenter, label)
+        y = 24 * len(self.STOPS) + 6
+        for i, name in enumerate(self.ICONS):
+            p.drawPixmap(i * 34, y, icons.pixmap(name, "text", 22))
         p.end()
 
 
@@ -406,12 +418,14 @@ class SettingsDialog(Dialog):
     install_tools = Signal()
     check_updates = Signal()
     update_ytdlp = Signal()
-    theme_preview = Signal(str, str, str, str)  # accent, signal, bar mode, ui mode: applied live, undone on Cancel
+    # accent, signal, bar colours, ui mode, design, bar style, icon style: applied live, undone on Cancel
+    theme_preview = Signal(str, str, str, str, str, str, str)
 
     def __init__(self, settings: Settings, parent=None, open_tab: int = 0):
         super().__init__(parent)
         self.setWindowTitle("Options")
         self.setMinimumSize(720, 470)
+        self.resize(900, 640)
         self.s = settings
         self.nav = QListWidget()
         self.nav.setObjectName("nav")
@@ -618,10 +632,45 @@ class SettingsDialog(Dialog):
         nf.addRow("Site logins", lcol)
 
         # Appearance
-        a, af = self._page("Appearance", "Pick the colour of the controls and meters. "
+        a, af = self._page("Appearance", "Pick a design, then fine-tune its progress bar, icons and colours. "
                                          "It changes right away; Cancel puts it back.")
         self._accent, self._signal = settings.accent, settings.signal
-        self._saved_theme = (settings.accent, settings.signal, settings.bar_colors, settings.ui_mode)
+        self._saved_theme = (settings.accent, settings.signal, settings.bar_colors, settings.ui_mode,
+                             settings.design, settings.bar_style, settings.icon_style)
+        design_row = QHBoxLayout()
+        design_row.setSpacing(8)
+        self.design_group = QButtonGroup(self)
+        for key, d in theme.DESIGNS.items():
+            b = QPushButton(f"{d['label']}\n{d['blurb']}")
+            b.setCheckable(True)
+            b.setCursor(Qt.PointingHandCursor)
+            b.setProperty("design", key)
+            b.setMinimumSize(150, 54)
+            b.setStyleSheet(_card_qss())
+            b.setChecked(settings.design == key)
+            self.design_group.addButton(b)
+            design_row.addWidget(b)
+        design_row.addStretch(1)
+        self.design_group.buttonClicked.connect(lambda _b: self._design_changed())
+        af.addRow("Design", design_row)
+        self.bar_style = QComboBox()
+        self.icon_style = QComboBox()
+        for combo, styles, current in ((self.bar_style, theme.BAR_STYLES, settings.bar_style),
+                                       (self.icon_style, theme.ICON_STYLES, settings.icon_style)):
+            combo.addItem("", "")                       # "As the design (…)", filled in by _style_labels
+            for key, label in styles.items():
+                combo.addItem(label, key)
+            combo.setCurrentIndex(max(0, combo.findData(current)))
+            combo.currentIndexChanged.connect(lambda _i: self._emit_theme())
+        self._style_labels()
+        styles_row = QHBoxLayout()
+        styles_row.setSpacing(8)
+        for label, combo in (("Progress bar", self.bar_style), ("Icons", self.icon_style)):
+            cap = QLabel(label)
+            cap.setObjectName("muted")
+            styles_row.addWidget(cap)
+            styles_row.addWidget(combo, 1)
+        af.addRow("Style", styles_row)
         mode_row = QHBoxLayout()
         mode_row.setSpacing(0)
         self.mode_group = QButtonGroup(self)
@@ -666,7 +715,7 @@ class SettingsDialog(Dialog):
         bar_col.setSpacing(6)
         bar_col.addWidget(self.bar_shift)
         bar_col.addWidget(self.bar_theme)
-        af.addRow("Progress bar", bar_col)
+        af.addRow("Bar colour", bar_col)
         self.preview = _BarPreview()
         af.addRow("Preview", self.preview)
         self._paint_custom_buttons()
@@ -785,6 +834,28 @@ class SettingsDialog(Dialog):
     def _bar_mode(self) -> str:
         return "theme" if self.bar_theme.isChecked() else "shift"
 
+    def _design(self) -> str:
+        b = self.design_group.checkedButton()
+        return b.property("design") if b else "studio"
+
+    def _look(self) -> tuple:
+        return (self._accent, self._signal, self._bar_mode(), self._ui_mode(), self._design(),
+                self.bar_style.currentData() or "", self.icon_style.currentData() or "")
+
+    def _style_labels(self):
+        d = theme.DESIGNS[self._design()]
+        self.bar_style.setItemText(0, f"As the design ({theme.BAR_STYLES[d['bar']]})")
+        self.icon_style.setItemText(0, f"As the design ({theme.ICON_STYLES[d['icons']]})")
+
+    def _design_changed(self):
+        # a new design brings its own bar and icons; the combos go back to "As the design"
+        for combo in (self.bar_style, self.icon_style):
+            combo.blockSignals(True)
+            combo.setCurrentIndex(0)
+            combo.blockSignals(False)
+        self._style_labels()
+        self._emit_theme()
+
     def _ui_mode(self) -> str:
         b = self.mode_group.checkedButton()
         return b.property("mode") if b else "dark"
@@ -813,7 +884,7 @@ class SettingsDialog(Dialog):
         self.btn_signal.setIcon(icons.icon("speed", self._signal, 16))
 
     def _emit_theme(self):
-        self.theme_preview.emit(self._accent, self._signal, self._bar_mode(), self._ui_mode())
+        self.theme_preview.emit(*self._look())
         self._restyle()
 
     def _restyle(self):
@@ -824,13 +895,15 @@ class SettingsDialog(Dialog):
             it.setIcon(icons.icon(it.data(Qt.UserRole), "muted", 18))
         for i, b in enumerate(self.mode_group.buttons()):
             b.setStyleSheet(_segment_qss(i, 3))
+        for b in self.design_group.buttons():
+            b.setStyleSheet(_card_qss())
         theme.apply_window_chrome(self)
         self.preview.update()
         for b in self.swatches.buttons():
             b.update()
 
     def reject(self):
-        if (self._accent, self._signal, self._bar_mode(), self._ui_mode()) != self._saved_theme:
+        if self._look() != self._saved_theme:
             self.theme_preview.emit(*self._saved_theme)
         super().reject()
 
@@ -853,7 +926,14 @@ class SettingsDialog(Dialog):
         outer.addWidget(d)
         outer.addLayout(form)
         outer.addStretch(1)
-        self.pages.addWidget(w)
+        # a page taller than the window scrolls instead of squeezing its rows
+        scroll = QScrollArea()
+        scroll.setObjectName("page")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setWidget(w)
+        self.pages.addWidget(scroll)
         return w, form
 
     def _refresh_tools(self):
@@ -912,7 +992,8 @@ class SettingsDialog(Dialog):
         s.proxy_port = self.proxy_port.value()
         s.proxy_user = self.proxy_user.text().strip()
         s.proxy_pass = vault.protect(self.proxy_pass.text())
-        s.accent, s.signal, s.bar_colors, s.ui_mode = self._accent, self._signal, self._bar_mode(), self._ui_mode()
+        (s.accent, s.signal, s.bar_colors, s.ui_mode, s.design, s.bar_style,
+         s.icon_style) = self._look()
         if not self.remember_box.isChecked():
             s.remember_dir = ""
         return s

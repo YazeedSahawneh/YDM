@@ -3,15 +3,15 @@
 <head>
 <meta charset="utf-8">
 <style>
-  :root { --bg:#121417; --panel:#191C20; --raised:#22262B; --line:#2C3137; --text:#ECE8E1;
+  :root { --bg:#121417; --panel:#191C20; --raised:#22262B; --line:#2C3137; --edge:#3A4048; --text:#ECE8E1;
           --muted:#969BA2; --faint:#5E646C; --accent:#FFB547; --on-accent:#1A1408; --signal:#3DDBC0;
           --error:#FF6B5E; --done:#A6E35A; }
   * { box-sizing: border-box; }
   ::selection { background: var(--accent); color: var(--on-accent); }
-  html, body { overflow-x:hidden; }
-  body { margin:0; width:340px; max-width:100vw; background:var(--bg); color:var(--text);
-         font: 13px "Segoe UI", system-ui, sans-serif; }
-  main > *, .row > * { min-width:0; }
+  /* A fixed width: a popup sizes itself to its content, so nothing here may depend on the viewport */
+  html, body { margin:0; overflow-x:hidden; }
+  body { width:360px; background:var(--bg); color:var(--text); font: 13px "Segoe UI", system-ui, sans-serif; }
+  button { font: inherit; color: inherit; }
   header { display:flex; align-items:center; gap:10px; padding:12px 14px; background:var(--panel);
            border-bottom:1px solid var(--line); }
   header img { width:24px; height:24px; }
@@ -21,21 +21,35 @@
   #led.on { background:var(--signal); box-shadow:0 0 0 3px rgba(61,219,192,.18); }
   #led.off { background:var(--error); box-shadow:0 0 0 3px rgba(255,107,94,.16); }
   main { padding:14px; display:grid; gap:14px; }
+  main > * { min-width:0; }
+  .legend { font-size:11px; font-weight:600; letter-spacing:.9px; text-transform:uppercase; color:var(--muted); }
   .primary { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; padding:10px;
              border-radius:7px; border:1px solid var(--accent); background:var(--accent); color:var(--on-accent);
-             font:600 13px "Segoe UI", system-ui, sans-serif; cursor:pointer; }
+             font-weight:600; cursor:pointer; }
   .primary:hover { background:#FFC266; }
   .primary:disabled { opacity:.45; cursor:default; }
-  .legend { font-size:11px; font-weight:600; letter-spacing:.9px; text-transform:uppercase; color:var(--muted); }
-  #media { display:grid; gap:6px; }
+  .shots { display:grid; grid-template-columns: 1.3fr 1fr 1fr; gap:6px; margin-top:8px; }
+  .shot { display:flex; flex-direction:column; align-items:center; gap:5px; padding:10px 6px 8px; border-radius:7px;
+          border:1px solid var(--line); background:var(--panel); cursor:pointer; text-align:center; }
+  .shot:hover { border-color:var(--accent); }
+  .shot.main { border-color:var(--accent); background:#2B2721; }
+  .shot svg { width:20px; height:20px; color:var(--accent); }
+  .shot b { font-weight:600; font-size:12.5px; }
+  .shot span { font-size:11px; color:var(--muted); }
+  .kbd { color:var(--faint); font-size:11px; margin-top:6px; }
+  .ghost { display:flex; align-items:center; justify-content:center; gap:8px; width:100%; padding:9px;
+           border-radius:7px; border:1px solid var(--line); background:var(--raised); cursor:pointer; font-weight:600; }
+  .ghost:hover:not(:disabled) { border-color:var(--accent); color:var(--accent); }
+  .ghost:disabled { opacity:.45; cursor:default; }
+  #media { display:grid; gap:6px; margin-top:8px; }
   .row { display:flex; align-items:center; gap:10px; padding:8px 10px; border:1px solid var(--line);
          border-radius:7px; background:var(--panel); }
-  .row .name { flex:1; min-width:0; }
+  .row > * { min-width:0; }
+  .row .name { flex:1; }
   .row .name > div { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   .row .meta { font-size:11.5px; color:var(--muted); font-variant-numeric: tabular-nums; }
-  .row button { flex:none; }
-  .row button { border:1px solid var(--line); background:var(--raised); color:var(--text); border-radius:6px;
-                padding:5px 10px; cursor:pointer; font:600 12px "Segoe UI", system-ui, sans-serif; }
+  .row button { flex:none; border:1px solid var(--line); background:var(--raised); border-radius:6px;
+                padding:5px 10px; cursor:pointer; font-weight:600; font-size:12px; }
   .row button:hover { border-color:var(--accent); color:var(--accent); }
   .row button.sent { color:var(--done); border-color:var(--line); }
   .empty { color:var(--muted); font-size:12px; }
@@ -48,18 +62,34 @@
   .switch input:checked + .slider { background:var(--accent); border-color:var(--accent); }
   .switch input:checked + .slider:before { transform:translateX(14px); background:var(--on-accent); }
   .switch input:focus-visible + .slider { outline:2px solid var(--accent); outline-offset:2px; }
+  .place { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .corners { display:grid; grid-template-columns: repeat(2, 26px); gap:4px; flex:none; padding:4px;
+             border:1px solid var(--line); border-radius:7px; background:var(--panel); }
+  .corners button { width:26px; height:20px; border-radius:4px; border:1px solid transparent; background:none;
+                    cursor:pointer; display:grid; place-items:center; }
+  .corners button i { width:8px; height:6px; border-radius:2px; background:var(--faint); }
+  .corners button:hover i { background:var(--muted); }
+  .corners button[aria-pressed="true"] { border-color:var(--accent); }
+  .corners button[aria-pressed="true"] i { background:var(--accent); }
+  .sub { font-size:11.5px; color:var(--muted); margin-top:2px; }
+  #siteHidden { display:none; align-items:center; justify-content:space-between; gap:10px; padding:9px 10px;
+                border:1px solid var(--line); border-radius:7px; background:var(--panel); font-size:12px; }
+  #siteHidden.show { display:flex; }
+  #siteHidden span { min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); }
+  .link { flex:none; border:none; background:none; color:var(--accent); cursor:pointer; padding:0; font-weight:600; }
   details summary { cursor:pointer; color:var(--muted); font-size:12px; }
   details .grid { display:grid; gap:10px; margin-top:10px; }
   details label { display:grid; gap:4px; font-size:12px; color:var(--muted); }
   input[type=number], input[type=text] { width:100%; background:var(--raised); color:var(--text);
          border:1px solid var(--line); border-radius:6px; padding:6px 8px; font: 13px "Segoe UI", system-ui, sans-serif; }
   input:focus { outline:none; border-color:var(--accent); }
+  button:focus-visible { outline:2px solid var(--accent); outline-offset:2px; }
   #hint { color:var(--muted); font-size:12px; min-height:1em; overflow-wrap:anywhere; }
+  hr { border:none; border-top:1px solid var(--line); margin:0; }
   #access { display:none; gap:8px; padding:10px; border:1px solid var(--accent); border-radius:7px; font-size:12px; }
   #access.show { display:grid; }
   #access button { justify-self:start; border:1px solid var(--accent); background:transparent; color:var(--accent);
-                   border-radius:6px; padding:5px 10px; cursor:pointer; font:600 12px "Segoe UI", system-ui, sans-serif; }
-  hr { border:none; border-top:1px solid var(--line); margin:0; }
+                   border-radius:6px; padding:5px 10px; cursor:pointer; font-weight:600; font-size:12px; }
 </style>
 </head>
 <body>
@@ -73,24 +103,58 @@
     <span>YDM needs access to all sites to catch downloads and show its buttons on videos.</span>
     <button id="allow">Allow on all sites</button>
   </div>
-  <button class="primary" id="grab">
+
+  <section>
+    <div class="legend">Screenshot</div>
+    <div class="shots">
+      <button class="shot main" data-shot="full" title="The whole page, top to bottom (Alt+Shift+Y)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6" y="2.5" width="12" height="19" rx="2"/><path d="M9 7h6M9 11h6M9 15h4"/></svg>
+        <b>Whole page</b><span>scrolls for you</span>
+      </button>
+      <button class="shot" data-shot="visible" title="What you can see now">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18"/></svg>
+        <b>Visible</b><span>this screen</span>
+      </button>
+      <button class="shot" data-shot="area" title="Drag a rectangle on the page">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 8V5a1 1 0 0 1 1-1h3M16 4h3a1 1 0 0 1 1 1v3M20 16v3a1 1 0 0 1-1 1h-3M8 20H5a1 1 0 0 1-1-1v-3"/></svg>
+        <b>Area</b><span>drag to pick</span>
+      </button>
+    </div>
+    <div class="kbd" id="shotHint">Then crop, draw, blur and save it as PNG, JPG or PDF, or copy it.</div>
+  </section>
+
+  <button class="ghost" id="grab">
     <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><rect x="1" y="3.5" width="9.5" height="9" rx="2" fill="none" stroke="currentColor" stroke-width="1.6"/><path d="M10.5 7 15 4.5v7L10.5 9" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
     Download the video on this tab
   </button>
+
   <div>
     <div class="legend">Media on this page</div>
-    <div id="media" style="margin-top:8px"><div class="empty">Play something and its streams show up here.</div></div>
+    <div id="media"><div class="empty">Play something and its streams show up here.</div></div>
   </div>
   <hr>
   <label class="switch-row">Catch browser downloads
     <span class="switch"><input type="checkbox" id="enabled"><span class="slider"></span></span>
   </label>
-  <label class="switch-row">Show “Download video” button on videos
+  <label class="switch-row">“Download video” button on videos
     <span class="switch"><input type="checkbox" id="videoButton"><span class="slider"></span></span>
   </label>
-  <label class="switch-row">Show “Save photo” button on big pictures
+  <label class="switch-row">“Save photo” button on big pictures
     <span class="switch"><input type="checkbox" id="imageButton"><span class="slider"></span></span>
   </label>
+  <div class="place">
+    <div>
+      <div>Where the button sits</div>
+      <div class="sub">Corner of the video or photo. You can also drag it.</div>
+    </div>
+    <div class="corners" role="group" aria-label="Button corner">
+      <button data-corner="tl" title="Top left" aria-label="Top left"><i></i></button>
+      <button data-corner="tr" title="Top right" aria-label="Top right"><i></i></button>
+      <button data-corner="bl" title="Bottom left" aria-label="Bottom left"><i></i></button>
+      <button data-corner="br" title="Bottom right" aria-label="Bottom right"><i></i></button>
+    </div>
+  </div>
+  <div id="siteHidden"><span id="siteHiddenText"></span><button class="link" id="showHere">Show again</button></div>
   <details>
     <summary>More options</summary>
     <div class="grid">

@@ -71,6 +71,40 @@ MODES = {
     },
 }
 MODE = "dark"
+_MODE_ASKED = "dark"     # what the user picked ("system" follows Windows)
+
+# Designs: the whole look in one pick (Options → Appearance). A design sets the progress bar, the icon
+# style, corner radius, list row height, the text font and its own grounds over MODES; the bar and the
+# icons can also be changed on their own. Status inks and the user's accent/signal stay the same.
+DESIGNS = {
+    "studio": {"label": "Studio", "blurb": "Graphite rack, HUD meter", "bar": "cells", "icons": "line",
+               "radius": 6, "row": 34, "font": "Segoe UI", "grounds": {}},
+    "simple": {"label": "Simple", "blurb": "Plain and quiet, thin line", "bar": "line", "icons": "thin",
+               "radius": 4, "row": 30, "font": "Segoe UI",
+               "grounds": {
+                   "dark": {"BG": "#141414", "PANEL": "#1A1A1A", "RAISED": "#232323", "LINE": "#2B2B2B",
+                            "TEXT": "#EDEDED", "MUTED": "#9A9A9A", "FAINT": "#5F5F5F", "UNLIT": "#2A2A2A",
+                            "ROW_LINE": "#1B1B1B", "EDGE": "#3A3A3A", "HOVER": "#262626", "SCROLL": "#353535",
+                            "SCROLL_HOVER": "#474747", "BANNER": "#1D1D1D", "SELECT_BASE": "#1E1E1E"},
+                   "light": {"BG": "#FFFFFF", "PANEL": "#F6F6F6", "RAISED": "#FFFFFF", "LINE": "#E4E4E4",
+                             "TEXT": "#1A1A1A", "MUTED": "#626262", "FAINT": "#A0A0A0", "UNLIT": "#E8E8E8",
+                             "ROW_LINE": "#F0F0F0", "EDGE": "#C8C8C8", "HOVER": "#FAFAFA", "SCROLL": "#D0D0D0",
+                             "SCROLL_HOVER": "#B5B5B5", "BANNER": "#F2F2F2", "SELECT_BASE": "#F3F3F3"}}},
+    "modern": {"label": "Modern", "blurb": "Soft and rounded, pill bar", "bar": "pill", "icons": "duotone",
+               "radius": 10, "row": 40, "font": "Segoe UI Variable Text",
+               "grounds": {
+                   "dark": {"BG": "#0E1320", "PANEL": "#141B2B", "RAISED": "#1D2539", "LINE": "#27314A",
+                            "TEXT": "#E6ECF7", "MUTED": "#8C98B0", "FAINT": "#56627C", "UNLIT": "#202A40",
+                            "ROW_LINE": "#141A28", "EDGE": "#36425E", "HOVER": "#222B42", "SCROLL": "#2E3953",
+                            "SCROLL_HOVER": "#3F4B68", "BANNER": "#172036", "SELECT_BASE": "#18203A"},
+                   "light": {"BG": "#EEF2F9", "PANEL": "#FFFFFF", "RAISED": "#FFFFFF", "LINE": "#D7DEEA",
+                             "TEXT": "#141A26", "MUTED": "#566078", "FAINT": "#98A2B6", "UNLIT": "#DEE5F0",
+                             "ROW_LINE": "#E3E9F2", "EDGE": "#B5C0D3", "HOVER": "#F7F9FD", "SCROLL": "#C3CCDB",
+                             "SCROLL_HOVER": "#A9B4C6", "BANNER": "#E2EAF8", "SELECT_BASE": "#E8EEF9"}}},
+}
+BAR_STYLES = {"cells": "HUD cells", "line": "Thin line", "pill": "Pill"}
+ICON_STYLES = {"line": "Line", "thin": "Thin", "duotone": "Duotone"}
+DESIGN, BAR, ICONS, RADIUS, ROW = "studio", "cells", "line", 6, 34
 
 BG = PANEL = RAISED = LINE = TEXT = MUTED = FAINT = UNLIT = ""
 ROW_LINE = EDGE = HOVER = SCROLL = SCROLL_HOVER = BANNER = SELECT_BASE = ""
@@ -100,10 +134,12 @@ def system_mode() -> str:
 
 def set_mode(mode: str) -> None:
     """"dark", "light" or "system". Call set_colors() afterwards (it rebuilds the QSS)."""
-    global MODE, BG, PANEL, RAISED, LINE, TEXT, MUTED, FAINT, UNLIT
+    global MODE, BG, PANEL, RAISED, LINE, TEXT, MUTED, FAINT, UNLIT, _MODE_ASKED
     global ROW_LINE, EDGE, HOVER, SCROLL, SCROLL_HOVER, BANNER, SELECT_BASE
+    _MODE_ASKED = mode
     MODE = system_mode() if mode == "system" else ("light" if mode == "light" else "dark")
-    t = MODES[MODE]
+    t = dict(MODES[MODE])
+    t.update(DESIGNS[DESIGN]["grounds"].get(MODE, {}))
     BG, PANEL, RAISED, LINE, TEXT = t["BG"], t["PANEL"], t["RAISED"], t["LINE"], t["TEXT"]
     MUTED, FAINT, UNLIT = t["MUTED"], t["FAINT"], t["UNLIT"]
     ROW_LINE, EDGE, HOVER, SCROLL = t["ROW_LINE"], t["EDGE"], t["HOVER"], t["SCROLL"]
@@ -117,12 +153,33 @@ def is_light() -> bool:
 
 set_mode("dark")
 
-FONT_FAMILY = "Segoe UI"
+FONT_FAMILY = "Segoe UI"       # text font of the style sheet (the design's, if Windows has it)
+NUMBER_FAMILY = "Segoe UI"     # numbers and panel legends: always Segoe UI (tabular figures)
+
+
+def set_design(design: str, bar: str = "", icons: str = "") -> None:
+    """Switch the design (and optionally its bar / icon style). Call set_colors() afterwards."""
+    global DESIGN, BAR, ICONS, RADIUS, ROW, FONT_FAMILY
+    DESIGN = design if design in DESIGNS else "studio"
+    d = DESIGNS[DESIGN]
+    BAR = bar if bar in BAR_STYLES else d["bar"]
+    ICONS = icons if icons in ICON_STYLES else d["icons"]
+    RADIUS, ROW = d["radius"], d["row"]
+    FONT_FAMILY = _installed(d["font"])
+    set_mode(_MODE_ASKED)
+
+
+def _installed(family: str) -> str:
+    try:
+        from PySide6.QtGui import QFontDatabase
+        return family if family in QFontDatabase.families() else "Segoe UI"
+    except Exception:  # noqa: BLE001 - no QGuiApplication yet
+        return "Segoe UI"
 
 
 def label_font(size: float = 7.5, weight: QFont.Weight = QFont.DemiBold) -> QFont:
     """Small-caps panel legend: uppercase, tracked."""
-    f = QFont(FONT_FAMILY)
+    f = QFont(NUMBER_FAMILY)
     f.setPointSizeF(size)
     f.setWeight(weight)
     f.setCapitalization(QFont.AllUppercase)
@@ -131,7 +188,7 @@ def label_font(size: float = 7.5, weight: QFont.Weight = QFont.DemiBold) -> QFon
 
 
 def number_font(size: float = 9.5, weight: QFont.Weight = QFont.Normal) -> QFont:
-    f = QFont(FONT_FAMILY)
+    f = QFont(NUMBER_FAMILY)
     f.setPointSizeF(size)
     f.setWeight(weight)
     if hasattr(QFont, "Tag"):                       # Qt 6.7+: force tabular figures
@@ -215,6 +272,7 @@ def progress_color(fraction: float, status: str = "Downloading", mode: str = "sh
 
 
 def build_qss() -> str:
+    R, r = RADIUS, max(3, RADIUS - 2)              # the design's corners: controls, and small things
     return f"""
 * {{ font-family: "{FONT_FAMILY}", "Segoe UI", sans-serif; font-size: 9.5pt; color: {TEXT}; }}
 QMainWindow, QDialog {{ background: {BG}; }}
@@ -222,16 +280,17 @@ QWidget#panel {{ background: {PANEL}; }}
 QToolTip {{ background: {RAISED}; color: {TEXT}; border: 1px solid {LINE}; padding: 5px 8px; }}
 
 QMenuBar {{ background: {PANEL}; border-bottom: 1px solid {LINE}; padding: 2px 4px; }}
-QMenuBar::item {{ background: transparent; padding: 5px 10px; border-radius: 4px; }}
+QMenuBar::item {{ background: transparent; padding: 5px 10px; border-radius: {r}px; }}
 QMenuBar::item:selected {{ background: {RAISED}; }}
 QMenuBar#captionMenu {{ background: transparent; border: none; padding: 0; }}
 QMenuBar#captionMenu::item {{ padding: 5px 9px; }}
 QLabel#captionTitle {{ font-size: 9pt; }}
 QWidget#listhead {{ background: {BG}; }}
+QScrollArea#page, QScrollArea#page > QWidget > QWidget {{ background: transparent; }}
 QLabel#listTitle {{ font-weight: 600; }}
 QCheckBox#muted {{ color: {MUTED}; }}
 QMenu {{ background: {PANEL}; border: 1px solid {LINE}; padding: 5px; }}
-QMenu::item {{ padding: 6px 28px 6px 12px; border-radius: 4px; }}
+QMenu::item {{ padding: 6px 28px 6px 12px; border-radius: {r}px; }}
 QMenu::item:selected {{ background: {RAISED}; }}
 QMenu::item:disabled {{ color: {FAINT}; }}
 QMenu::separator {{ height: 1px; background: {LINE}; margin: 5px 8px; }}
@@ -241,7 +300,7 @@ QMenu::indicator {{ width: 12px; height: 12px; margin-left: 8px; }}
 QToolBar {{ background: {PANEL}; border: none; border-bottom: 1px solid {LINE};
             spacing: 2px; padding: 6px 8px; }}
 QToolBar::separator {{ background: {LINE}; width: 1px; margin: 8px 6px; }}
-QToolBar QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: 6px;
+QToolBar QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: {R}px;
                         padding: 5px 7px 4px 7px; color: {TEXT}; font-size: 8.5pt; min-width: 54px; }}
 QToolBar QToolButton:hover {{ background: {RAISED}; border-color: {LINE}; }}
 QToolBar QToolButton:pressed {{ background: {LINE}; }}
@@ -250,7 +309,7 @@ QToolBar QToolButton#primary {{ color: {ACCENT_INK}; font-weight: 600; }}
 
 QTreeWidget#sidebar {{ background: {PANEL}; border: none; border-right: 1px solid {LINE};
                        padding: 8px 6px; outline: 0; }}
-QTreeWidget#sidebar::item {{ padding: 5px 4px; margin: 1px 0; }}
+QTreeWidget#sidebar::item {{ padding: 5px 4px; margin: 1px 0; border-radius: {r if RADIUS >= 8 else 0}px; }}
 QTreeWidget#sidebar::item:selected {{ background: {SELECT}; color: {TEXT}; }}
 QTreeWidget#sidebar::item:hover:!selected {{ background: {RAISED}; }}
 QTreeWidget#sidebar::branch {{ background: transparent; }}
@@ -270,7 +329,7 @@ QStatusBar QLabel {{ color: {MUTED}; padding: 2px 8px; }}
 QStatusBar::item {{ border: none; }}
 
 QLineEdit, QSpinBox, QComboBox, QTimeEdit, QPlainTextEdit {{
-    background: {RAISED}; border: 1px solid {LINE}; border-radius: 6px; padding: 6px 8px;
+    background: {RAISED}; border: 1px solid {LINE}; border-radius: {R}px; padding: 6px 8px;
     selection-background-color: {ACCENT}; selection-color: {ON_ACCENT}; }}
 QLineEdit:focus, QSpinBox:focus, QComboBox:focus, QTimeEdit:focus, QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
 QLineEdit:disabled {{ color: {FAINT}; }}
@@ -279,7 +338,7 @@ QComboBox QAbstractItemView {{ background: {PANEL}; border: 1px solid {LINE}; ou
                                selection-background-color: {RAISED}; selection-color: {TEXT}; padding: 4px; }}
 QSpinBox::up-button, QSpinBox::down-button, QTimeEdit::up-button, QTimeEdit::down-button {{ width: 16px; border: none; }}
 
-QPushButton {{ background: {RAISED}; border: 1px solid {LINE}; border-radius: 6px; padding: 7px 16px; }}
+QPushButton {{ background: {RAISED}; border: 1px solid {LINE}; border-radius: {R}px; padding: 7px 16px; }}
 QPushButton:hover {{ border-color: {EDGE}; background: {HOVER}; }}
 QPushButton:pressed {{ background: {LINE}; }}
 QPushButton:focus {{ border-color: {ACCENT}; }}
@@ -298,11 +357,11 @@ QRadioButton::indicator {{ width: 14px; height: 14px; border-radius: 7px; border
 QRadioButton::indicator:checked {{ background: {ACCENT}; border: 3px solid {RAISED}; }}
 
 QListWidget#nav {{ background: {PANEL}; border: none; border-right: 1px solid {LINE}; padding: 10px 6px; outline: 0; }}
-QListWidget#nav::item {{ padding: 8px 12px; border-radius: 5px; margin: 1px 0; }}
+QListWidget#nav::item {{ padding: 8px 12px; border-radius: {r}px; margin: 1px 0; }}
 QListWidget#nav::item:selected {{ background: {SELECT}; color: {TEXT}; }}
 QListWidget#nav::item:hover:!selected {{ background: {RAISED}; }}
-QListWidget#choices {{ background: {BG}; border: 1px solid {LINE}; border-radius: 6px; outline: 0; padding: 4px; }}
-QListWidget#choices::item {{ padding: 7px 10px; border-radius: 4px; }}
+QListWidget#choices {{ background: {BG}; border: 1px solid {LINE}; border-radius: {R}px; outline: 0; padding: 4px; }}
+QListWidget#choices::item {{ padding: 7px 10px; border-radius: {r}px; }}
 QListWidget#choices::item:selected {{ background: {SELECT}; color: {TEXT}; }}
 QListWidget#choices::item:hover:!selected {{ background: {RAISED}; }}
 

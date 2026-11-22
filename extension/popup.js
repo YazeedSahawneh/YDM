@@ -1,4 +1,5 @@
-const DEFAULTS = { enabled: true, videoButton: true, imageButton: true, port: 9614, minSizeKB: 0, skipExt: "" };
+const DEFAULTS = { enabled: true, videoButton: true, imageButton: true, port: 9614, minSizeKB: 0, skipExt: "",
+                   buttonCorner: "tr", hiddenSites: [] };
 const $ = (id) => document.getElementById(id);
 
 function size(n) {
@@ -25,9 +26,43 @@ async function init() {
   $("minSizeKB").addEventListener("change", (e) => chrome.storage.local.set({ minSizeKB: Number(e.target.value) || 0 }));
   $("skipExt").addEventListener("change", (e) => chrome.storage.local.set({ skipExt: e.target.value }));
 
+  // where the on-page button sits
+  const corners = document.querySelectorAll("[data-corner]");
+  const markCorner = (c) => corners.forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.corner === c)));
+  markCorner(s.buttonCorner);
+  corners.forEach((b) => b.addEventListener("click", () => {
+    chrome.storage.local.set({ buttonCorner: b.dataset.corner });
+    markCorner(b.dataset.corner);
+  }));
+
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  const web = !!tab?.url && /^https?:/.test(tab.url);
+
+  // buttons hidden on this site ("Hide on this site" in the button's menu)
+  const site = web ? new URL(tab.url).hostname.replace(/^www\./, "") : "";
+  if (site && (s.hiddenSites || []).includes(site)) {
+    $("siteHiddenText").textContent = `The buttons are hidden on ${site}`;
+    $("siteHidden").classList.add("show");
+    $("showHere").addEventListener("click", async () => {
+      const { hiddenSites } = await chrome.storage.local.get({ hiddenSites: [] });
+      await chrome.storage.local.set({ hiddenSites: hiddenSites.filter((h) => h !== site) });
+      $("siteHidden").classList.remove("show");
+    });
+  }
+
+  // screenshots: the background does the work; the popup gets out of the way first
+  document.querySelectorAll("[data-shot]").forEach((b) => b.addEventListener("click", async () => {
+    if (!tab) return;
+    await chrome.runtime.sendMessage({ type: "shot", mode: b.dataset.shot, tabId: tab.id });
+    window.close();
+  }));
+  chrome.commands?.getAll?.().then((cmds) => {
+    const key = cmds.find((c) => c.name === "shot-full")?.shortcut;
+    if (key) $("shotHint").textContent = `${key} takes the whole page. Then crop, draw, blur and save as PNG, JPG or PDF.`;
+  }).catch(() => {});
+
   $("grab").addEventListener("click", async () => {
-    if (!tab?.url?.startsWith("http")) { $("hint").textContent = "Open a page with a video first."; return; }
+    if (!web) { $("hint").textContent = "Open a page with a video first."; return; }
     $("grab").disabled = true;
     const ok = await chrome.runtime.sendMessage({ type: "grab-video", url: tab.url });
     $("hint").textContent = ok ? "Sent. Pick the quality in YDM." : "Couldn't reach YDM. Is it running?";
@@ -50,7 +85,7 @@ async function access() {
 
 async function showMedia(tabId) {
   const list = await chrome.runtime.sendMessage({ type: "media-list", tabId });
-  if (!list.length) return;
+  if (!list || !list.length) return;
   const box = $("media");
   box.textContent = "";
   for (const m of list) {

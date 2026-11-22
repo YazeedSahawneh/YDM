@@ -44,6 +44,16 @@ Drawn in code on a 24-unit grid, 1.7 stroke, round caps (`icons.py`). Tinted MUT
 ## Motion
 Product-speed only. Menu, combo and tooltip animations are disabled (`main.py`), so menus open instantly. The list refreshes every 400 ms: cells fill and connection heads move with real data. The one decorative motion is the big gauge's sweep while a download runs. The extension button gets a 150 ms border/lift on hover.
 
+## Designs
+Options → Appearance offers three designs (`theme.DESIGNS`); each sets its own grounds over the dark/light tokens, the corner radius, list row height, text font, progress bar and icon style. Status inks and the user's accent/signal stay the same across all three.
+- **Studio** (default): everything described above. Radius 6, rows 34, HUD cells, line icons (1.7 strokes).
+- **Simple**: neutral greys without the graphite tint (dark #141414 / light #FFFFFF), radius 4, rows 30, a 4 px (6 px big) rounded line that fills smoothly, thin icons (1.15 strokes, solid shapes outlined, dots stay solid).
+- **Modern**: cool slate (dark #0E1320 / light #EEF2F9), radius 10 (sidebar items rounded too), rows 40, Segoe UI Variable Text, a 12 px (16 px big) pill with a light-to-colour gradient and, on the big bar while bytes arrive, white stripes drifting right; duotone icons (a 28 % tint inside every closed outline).
+Only the HUD gauge shows the individual connections; the line and the pill stay calm. Settings pages scroll when they're taller than the window.
+
+## Screenshot editor (extension)
+`shot.html` uses the extension's own tokens (graphite, amber pressables, teal signal). Header: page title and size, then Copy · PNG (primary) · JPG · PDF with a page-size menu. Tool rail: icon tools in the app's drawing (24 grid, 1.7 strokes), seven colour swatches plus any colour, three sizes, undo/redo, zoom. The picture sits on a near-black stage with a soft shadow; only the part on screen is drawn, so very long pages stay smooth.
+
 ## Components
 - Toolbar: icon over label, transparent until hover (RAISED + LINE). Add URL in amber text.
 - Sidebar: category tree with muted counts; selected = SELECT.

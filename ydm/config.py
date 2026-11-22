@@ -12,7 +12,7 @@ from pathlib import Path
 
 APP_NAME = "YDM"
 APP_TITLE = "YDM — Download Manager"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.7.0"
 DEFAULT_PORT = 9614
 ACCENT = "#FFB547"          # amber: only on things you can press (buttons, selection)
 SIGNAL = "#3DDBC0"          # meter light: bytes arriving
@@ -97,6 +97,9 @@ class Settings:
     signal: str = SIGNAL                # theme: meters
     bar_colors: str = "shift"           # progress bar: "shift" (red → green with the %) or "theme"
     ui_mode: str = "dark"               # dark | light | system
+    design: str = "studio"              # studio | simple | modern (theme.DESIGNS)
+    bar_style: str = ""                 # "" = the design's; cells | line | pill
+    icon_style: str = ""                # "" = the design's; line | thin | duotone
     remember_dir: str = ""              # "remember this folder" in a download window: every download goes here
     compact_view: bool = False          # the main window as a small list of the downloads only
     layout_version: int = 0             # settings migrations done (see load)

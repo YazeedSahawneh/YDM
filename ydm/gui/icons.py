@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QLineF, QPointF, QRectF, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
 
 from . import theme
@@ -151,11 +151,11 @@ def _color(color: str | None) -> str:
 
 
 def pixmap(name: str, color: str | None = None, size: int = 24, dpr: float = 2.0) -> QPixmap:
-    return _pixmap(name, _color(color), size, dpr)
+    return _pixmap(name, _color(color), size, dpr, theme.ICONS)
 
 
 def icon(name: str, color: str | None = None, size: int = 24) -> QIcon:
-    return _icon(name, _color(color), size, theme.FAINT)
+    return _icon(name, _color(color), size, theme.FAINT, theme.ICONS)
 
 
 def put(target, name: str, role: str = "text", size: int = 16):
@@ -180,8 +180,21 @@ def retint(roots=()) -> None:
             t.setIcon(icon(name, role, int(size)))
 
 
-@lru_cache(maxsize=512)
-def _pixmap(name: str, color: str, size: int = 24, dpr: float = 2.0) -> QPixmap:
+# Icon styles (Options → Appearance): the same glyphs, drawn three ways.
+#   line: 1.7 strokes, solid shapes filled.  thin: 1.15 strokes, shapes outlined (dots stay solid).
+#   duotone: line, plus a 28 % tint inside every closed outline.
+STYLE_STROKE = {"line": STROKE, "thin": 1.15, "duotone": 1.6}
+
+
+def _closed(path: QPainterPath) -> bool:
+    if path.elementCount() < 3:
+        return False
+    first = path.elementAt(0)
+    return QLineF(QPointF(first.x, first.y), path.currentPosition()).length() < 0.01
+
+
+@lru_cache(maxsize=1024)
+def _pixmap(name: str, color: str, size: int = 24, dpr: float = 2.0, style: str = "line") -> QPixmap:
     pm = QPixmap(int(size * dpr), int(size * dpr))
     pm.setDevicePixelRatio(dpr)
     pm.fill(Qt.transparent)
@@ -189,8 +202,16 @@ def _pixmap(name: str, color: str, size: int = 24, dpr: float = 2.0) -> QPixmap:
     p.setRenderHint(QPainter.Antialiasing)
     p.scale(size / 24, size / 24)
     c = QColor(color)
-    pen = QPen(c, STROKE * (24 / size) ** 0.35, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    pen = QPen(c, STYLE_STROKE.get(style, STROKE) * (24 / size) ** 0.35, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+    tint = QColor(c)
+    tint.setAlphaF(0.28)
     for path, filled in _glyph(name):
+        if style == "thin" and filled and max(path.boundingRect().width(), path.boundingRect().height()) > 5:
+            filled = False                          # outlines only, except small dots
+        if style == "duotone" and not filled and _closed(path):
+            p.setPen(Qt.NoPen)
+            p.setBrush(tint)
+            p.drawPath(path)
         p.setPen(pen)
         p.setBrush(c if filled else Qt.NoBrush)
         p.drawPath(path)
@@ -198,11 +219,11 @@ def _pixmap(name: str, color: str, size: int = 24, dpr: float = 2.0) -> QPixmap:
     return pm
 
 
-@lru_cache(maxsize=512)
-def _icon(name: str, color: str, size: int, faint: str) -> QIcon:
+@lru_cache(maxsize=1024)
+def _icon(name: str, color: str, size: int, faint: str, style: str = "line") -> QIcon:
     ic = QIcon()
-    ic.addPixmap(_pixmap(name, color, size), QIcon.Normal)
-    ic.addPixmap(_pixmap(name, faint, size), QIcon.Disabled)
+    ic.addPixmap(_pixmap(name, color, size, 2.0, style), QIcon.Normal)
+    ic.addPixmap(_pixmap(name, faint, size, 2.0, style), QIcon.Disabled)
     return ic
 
 

@@ -192,6 +192,40 @@ sd = SettingsDialog(s, w, 6); sd.show(); pump(0.1)
 sd.theme_preview.connect(w.apply_theme)
 sd._pick_colors(*theme.PRESETS["Rose"]); assert theme.ACCENT == theme.PRESETS["Rose"][0] and theme.ACCENT in app.styleSheet()
 sd.reject(); assert theme.ACCENT == s.accent.upper(), "Cancel didn't restore the theme"
+# designs: Studio / Simple / Modern switch in place; the bar and the icons can be picked on their own
+sd = SettingsDialog(s, w, 6); sd.show(); pump(0.1)
+sd.theme_preview.connect(w.apply_theme)
+designs = {b.property("design"): b for b in sd.design_group.buttons()}
+assert set(designs) == {"studio", "simple", "modern"}
+designs["modern"].click(); pump(0.2)
+assert (theme.DESIGN, theme.BAR, theme.ICONS, theme.RADIUS) == ("modern", "pill", "duotone", 10), theme.DESIGN
+assert w.table.verticalHeader().defaultSectionSize() == theme.ROW == 40 and theme.BG == theme.DESIGNS["modern"]["grounds"]["dark"]["BG"]
+assert "border-radius: 10px" in app.styleSheet()
+w.grab().save(f"{out}/design-modern.png")
+sd.bar_style.setCurrentIndex(sd.bar_style.findData("cells")); pump(0.1)
+assert theme.BAR == "cells" and theme.DESIGN == "modern", "picking a bar on its own"
+sd.icon_style.setCurrentIndex(sd.icon_style.findData("thin")); pump(0.1); assert theme.ICONS == "thin"
+designs["simple"].click(); pump(0.2)
+assert (theme.DESIGN, theme.BAR, theme.ICONS) == ("simple", "line", "thin"), (theme.DESIGN, theme.BAR, theme.ICONS)
+assert sd.bar_style.currentIndex() == 0 and sd.icon_style.currentIndex() == 0, "a new design brings its own bar and icons"
+assert sd.bar_style.itemText(0) == "As the design (Thin line)"
+w.grab().save(f"{out}/design-simple.png")
+look = sd._look()
+assert look[4:] == ("simple", "", "") and theme.ROW == 30
+sd.reject(); pump(0.1)
+assert (theme.DESIGN, theme.BAR, theme.ICONS) == ("studio", "cells", "line"), "Cancel puts the design back"
+# the three bars paint at every state without errors (list, big window bar, preview)
+from ydm.gui import hudbar
+from PySide6.QtGui import QImage, QPainter as _QP
+from PySide6.QtCore import QRectF
+img = QImage(400, 40, QImage.Format_ARGB32)
+for bar in ("cells", "line", "pill"):
+    theme.BAR = bar
+    for it in m.items():
+        for big in (False, True):
+            pp = _QP(img); hudbar.draw_bar(pp, QRectF(0, 10, 380, 14), it, big=big); pp.end()
+    pp = _QP(img); hudbar.draw_bar(pp, QRectF(0, 10, 380, 14), None, fraction=0.4, status=Status.PAUSED); pp.end()
+theme.set_design("studio")
 # light mode switches in place and back
 w.apply_theme(s.accent, s.signal, s.bar_colors, "light"); pump(0.3)
 assert theme.MODE == "light" and theme.BG in app.styleSheet(); w.grab().save(f"{out}/light.png")

@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Screenshot · YDM</title>
+<link rel="icon" href="icons/icon32.png">
+<link rel="stylesheet" href="shot.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <img src="icons/icon48.png" alt="">
+    <div class="what">
+      <div id="title">Screenshot</div>
+      <div id="meta" class="muted"></div>
+    </div>
+  </div>
+  <div class="actions">
+    <button id="copy" class="btn" title="Copy the image (Ctrl+C)" disabled></button>
+    <button id="png" class="btn primary" title="Save as PNG (Ctrl+S)" disabled></button>
+    <button id="jpg" class="btn" title="Save as JPG: smaller files" disabled></button>
+    <div class="split">
+      <button id="pdf" class="btn" title="Save as PDF" disabled></button>
+      <button id="pdfMore" class="btn caret" title="PDF page size" aria-haspopup="menu" disabled></button>
+      <div id="pdfMenu" class="menu" role="menu" hidden>
+        <button role="menuitemradio" data-pdf="long">One long page <span>like the screen</span></button>
+        <button role="menuitemradio" data-pdf="a4">A4 pages <span>for printing</span></button>
+        <button role="menuitemradio" data-pdf="letter">Letter pages <span>for printing</span></button>
+      </div>
+    </div>
+  </div>
+</header>
+
+<nav class="tools" aria-label="Editing tools">
+  <div class="group" id="toolGroup"></div>
+  <span class="sep"></span>
+  <div class="group" id="colors" aria-label="Colour"></div>
+  <label class="swatch custom" title="Any colour"><input type="color" id="customColor" value="#3ddbc0"></label>
+  <span class="sep"></span>
+  <div class="group" id="sizes" aria-label="Size"></div>
+  <span class="sep"></span>
+  <div class="group">
+    <button id="undo" class="icon" title="Undo (Ctrl+Z)" disabled></button>
+    <button id="redo" class="icon" title="Redo (Ctrl+Y)" disabled></button>
+  </div>
+  <div class="spacer"></div>
+  <div class="group zoom">
+    <button id="zoomOut" class="icon" title="Zoom out (Ctrl+−)"></button>
+    <button id="zoomLabel" class="text" title="Fit to the window / actual size">100%</button>
+    <button id="zoomIn" class="icon" title="Zoom in (Ctrl++)"></button>
+  </div>
+</nav>
+
+<div id="note" class="note" hidden></div>
+
+<main id="viewport">
+  <div id="stage"><div id="spacer"></div></div>
+  <canvas id="view"></canvas>
+  <div id="cropBar" class="floatbar" hidden>
+    <button id="cropApply" class="btn primary small">Crop</button>
+    <button id="cropCancel" class="btn small">Cancel</button>
+  </div>
+  <textarea id="textBox" spellcheck="false" hidden></textarea>
+  <div id="loading" class="center">
+    <div class="scan"><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="muted">Putting the screenshot together…</div>
+  </div>
+  <div id="failed" class="center" hidden>
+    <div class="big">Couldn't take this screenshot</div>
+    <div id="failedText" class="muted"></div>
+  </div>
+</main>
+
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="shotdb.js"></script>
+<script src="pdf.js"></script>
+<script src="shot.js"></script>
+</body>
+</html>

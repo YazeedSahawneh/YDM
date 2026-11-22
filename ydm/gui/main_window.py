@@ -261,7 +261,7 @@ class MainWindow(frame.Frameless, QMainWindow):
         self.table.setSortingEnabled(True)
         self.table.sortByColumn(COL_ADDED, Qt.DescendingOrder)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(34)
+        self.table.verticalHeader().setDefaultSectionSize(theme.ROW)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._context_menu)
         self.table.doubleClicked.connect(self._open_item)
@@ -753,15 +753,21 @@ class MainWindow(frame.Frameless, QMainWindow):
             s = dlg.updated_settings()
             s.save()
             self.manager.apply_settings(s)
-            self.apply_theme(s.accent, s.signal, s.bar_colors, s.ui_mode)
+            self.apply_theme(s.accent, s.signal, s.bar_colors, s.ui_mode, s.design, s.bar_style, s.icon_style)
             if s.port != old_port:
                 QMessageBox.information(self, APP_NAME, "Restart YDM to use the new extension port.")
             self.refresh()
 
-    def apply_theme(self, accent: str, signal: str, bar_mode: str, ui_mode: str = "dark"):
-        """Recolour the whole app in place (Options → Appearance): light/dark, accent, meters."""
+    def apply_theme(self, accent: str, signal: str, bar_mode: str, ui_mode: str = "dark", design: str | None = None,
+                    bar_style: str | None = None, icon_style: str | None = None):
+        """Restyle the whole app in place (Options → Appearance): design, bar and icon style, light/dark,
+        accent, meters. Design / bar / icons left out keep the saved ones."""
+        s = self.settings
         theme.set_mode(ui_mode)
+        theme.set_design(s.design if design is None else design, s.bar_style if bar_style is None else bar_style,
+                         s.icon_style if icon_style is None else icon_style)
         theme.set_colors(accent, signal)
+        self.table.verticalHeader().setDefaultSectionSize(theme.ROW)
         hudbar.BAR_MODE[0] = bar_mode
         app = QApplication.instance()
         app.setPalette(theme.palette())

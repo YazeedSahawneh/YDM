@@ -3,6 +3,8 @@
 // One file for every browser: Chromium runs it as a service worker, Firefox as an event page
 // (manifest "background" lists both); Firefox answers to the chrome.* names too.
 
+if (typeof importScripts === "function") importScripts("shotdb.js");   // Firefox loads it from the manifest
+
 const DEFAULTS = { enabled: true, videoButton: true, imageButton: true, port: 9614, minSizeKB: 0, skipExt: "" };
 const bypass = new Set();          // URLs we deliberately give back to the browser
 
@@ -133,11 +135,20 @@ chrome.runtime.onInstalled.addListener(() => {
         "*://*.threads.net/*", "*://*.threads.com/*", "*://*.tumblr.com/*", "*://bsky.app/*"] });
     chrome.contextMenus.create({ id: "ydm-all", title: "Download all links on this page with YDM",
       contexts: ["page"] });
+    chrome.contextMenus.create({ id: "ydm-shot", title: "Screenshot with YDM", contexts: ["page", "image", "video"] });
+    for (const [mode, title] of [["full", "Whole page"], ["visible", "Visible part"], ["area", "Select an area…"]]) {
+      chrome.contextMenus.create({ id: `ydm-shot-${mode}`, parentId: "ydm-shot", title,
+        contexts: ["page", "image", "video"] });
+    }
   });
 });
 
 chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   let ok;
+  if (String(info.menuItemId).startsWith("ydm-shot-")) {
+    screenshot(tab, String(info.menuItemId).slice(9));
+    return;
+  }
   if (info.menuItemId === "ydm-link") {
     const url = info.linkUrl || info.srcUrl;
     if (!url || !/^https?:/i.test(url)) return;
@@ -226,4 +237,114 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     getSettings().then((s) => ping(s.port)).then(reply);
     return true;
   }
+  if (msg.type === "shot") {                    // from the popup (it closes itself right after)
+    chrome.tabs.get(msg.tabId).then((tab) => screenshot(tab, msg.mode), () => {});
+    reply(true);
+    return;
+  }
 });
+
+// ---- screenshots (whole page / visible part / an area) → the editor page -------------------------
+// The page scrolls itself one screen at a time (content.js), each screen is captured here, the screens
+// go to IndexedDB (shotdb.js) and shot.html stitches, edits and saves them.
+const SHOT_MAX_FRAMES = 60;       // a very long page (endless feeds) stops there, and says so
+let shooting = false, lastCapture = 0;
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const toPage = (tabId, msg) => chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
+
+chrome.commands?.onCommand.addListener(async (command, tab) => {
+  if (!command.startsWith("shot-")) return;
+  tab = tab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
+  screenshot(tab, command.slice(5));
+});
+
+async function pageReady(tabId) {
+  try { if (await toPage(tabId, { type: "shot-ping" })) return true; } catch { /* not there yet */ }
+  try {                                         // a tab that was open before the extension was (re)loaded
+    await chrome.scripting.executeScript({ target: { tabId, frameIds: [0] }, files: ["content.js"] });
+    return !!(await toPage(tabId, { type: "shot-ping" }));
+  } catch { return false; }
+}
+
+async function grab(windowId) {
+  const gap = 600 - (Date.now() - lastCapture);  // Chrome allows two captures a second
+  if (gap > 0) await sleep(gap);
+  lastCapture = Date.now();
+  const url = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
+  return (await fetch(url)).blob();
+}
+
+function shotBadge(tabId, text) {
+  chrome.action.setBadgeBackgroundColor({ color: "#3DDBC0", tabId }).catch(() => {});
+  chrome.action.setBadgeText({ text, tabId }).catch(() => {});
+}
+
+function friendly(err) {
+  const m = String(err && err.message || err || "");
+  if (/cannot access|chrome:\/\/|edge:\/\/|about:|extensions gallery|webstore|cannot be scripted|host permission|activeTab|not in effect/i.test(m)) {
+    return "The browser doesn't let extensions capture this page (its own pages, the extension store and some PDFs).";
+  }
+  return m || "The capture stopped.";
+}
+
+async function screenshot(tab, mode) {
+  if (shooting || !tab || !["full", "visible", "area"].includes(mode)) return;
+  shooting = true;
+  const rec = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), created: Date.now(),
+                title: tab.title || "", url: tab.url || "", mode, frames: [], note: "", error: "" };
+  let began = false;
+  try {
+    const ready = await pageReady(tab.id);
+    if (!ready && mode !== "visible") {
+      rec.note = "This page doesn't let extensions scroll it, so only the visible part was captured.";
+      mode = rec.mode = "visible";
+    }
+    const info = ready ? await toPage(tab.id, { type: "shot-ping" }) : null;
+    if (info) rec.vw = info.w;
+    if (mode === "area") {
+      const rect = await toPage(tab.id, { type: "shot-select" });
+      if (!rect) return;                          // Esc: nothing to show
+      rec.crop = rect;
+      rec.frames.push({ y: 0, blob: await grab(tab.windowId) });
+    } else if (mode === "visible") {
+      rec.frames.push({ y: 0, blob: await grab(tab.windowId) });
+    } else {
+      const m = await toPage(tab.id, { type: "shot-begin" });
+      began = true;
+      Object.assign(rec, { vw: m.vw, rect: m.rect, inner: m.inner, title: m.title || rec.title });
+      let y = 0, total = m.total, last = -1;
+      for (let i = 0; ; i++) {
+        const r = await toPage(tab.id, { type: "shot-scroll", y, index: i });
+        if (!r) throw new Error("The page stopped answering.");
+        if (!(await chrome.tabs.get(tab.id)).active) throw new Error("You switched tabs, so the capture stopped.");
+        if (r.y <= last) break;                   // it doesn't scroll any further
+        rec.frames.push({ y: r.y, blob: await grab(tab.windowId) });
+        last = r.y;
+        total = r.total;
+        shotBadge(tab.id, `${Math.min(99, Math.round(((r.y + m.view) / total) * 100))}%`);
+        if (r.y + m.view >= total - 1) break;
+        if (rec.frames.length >= SHOT_MAX_FRAMES) {
+          rec.note = `The page is very long: its first ${rec.frames.length} screens were captured.`;
+          total = r.y + m.view;
+          break;
+        }
+        y = r.y + m.view;
+      }
+      rec.total = total;
+    }
+  } catch (e) {
+    rec.error = friendly(e);
+  } finally {
+    if (began) await toPage(tab.id, { type: "shot-end" }).catch(() => {});
+    shotBadge(tab.id, "");
+    shooting = false;
+  }
+  if (!rec.frames.length && !rec.error) return;
+  try {
+    await ShotDB.put(rec);
+    await ShotDB.prune();
+  } catch (e) {
+    rec.error = `Couldn't keep the screenshot: ${e.message || e}`;
+  }
+  chrome.tabs.create({ url: chrome.runtime.getURL(`shot.html#${rec.id}`), index: tab.index + 1, openerTabId: tab.id });
+}

@@ -186,8 +186,8 @@ class MeterDelegate(QStyledItemDelegate):
         r = QRectF(option.rect).adjusted(6, 0, -8, 0)
         text_w = 40
         bar = QRectF(r.x(), r.center().y() - 7, max(10.0, r.width() - text_w - 6), 14)
-        from .hudbar import draw_hud_bar
-        color = draw_hud_bar(painter, bar, item)
+        from .hudbar import draw_bar
+        color = draw_bar(painter, bar, item)
         painter.setFont(self._font)
         painter.setPen(color if item.status in Status.ACTIVE else QColor(theme.MUTED))
         label = f"{item.progress * 100:.0f}%" if item.total > 0 or item.status == Status.COMPLETED else ""

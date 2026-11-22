@@ -43,7 +43,9 @@ ydm/gui/download_window.py      IDM-style small window per download: pre-start �
 ydm/gui/hudbar.py               the progress bar (HUD gauge, colour by %), used in the list, details pane, window
 ydm/gui/                        main_window, dialogs (Batch, Settings, Login, Renew, Countdown), models (table),
                                 widgets (SpeedMeter, DetailsPane, Banner), icons (drawn glyphs), theme (tokens + QSS)
-extension/                      MV3: background.js (catch downloads, media sniffer, menus), content.js (video button), popup
+extension/                      MV3: background.js (catch downloads, media sniffer, menus, screenshot capture), content.js
+                                (video/photo button, page side of screenshots), popup, shot.html/js/css (screenshot editor),
+                                shotdb.js (IndexedDB for captures), pdf.js (tiny JPEG-per-page PDF writer)
 ```
 
 ### How a download works
@@ -88,6 +90,12 @@ A link from the browser or Add URL starts downloading immediately as a `pending`
 
 ### Finish window
 The engine's "completed" event goes to `MainWindow._finished`: an open `DownloadWindow` handles it (`finished()`: auto-confirms a pending file that finished before Start, opens the file if `item.open_when_done`, else shows the finish screen or closes itself when `Settings.finish_window` is off). A window hidden while its download ran (`_watched`) is opened again finished. There's no Windows notification for finished downloads (only `notify_on_complete` for failures). `item.open_when_done` is one-shot: whoever opens the file clears it.
+
+### Designs
+`theme.set_design(design, bar, icons)` (Settings `design`, `bar_style`, `icon_style`; "" = the design's own) sets `theme.DESIGN/BAR/ICONS/RADIUS/ROW/FONT_FAMILY` and re-applies the mode with the design's grounds over `MODES`; call `set_colors()` after it (rebuilds the QSS). Paint code reads `theme.BAR` through `hudbar.draw_bar()` (cells → `draw_hud_bar`, line, pill) and icons read `theme.ICONS` (the lru caches key on it), so `MainWindow.apply_theme(..., design, bar_style, icon_style)` restyles everything live; the list row height is `theme.ROW`. Numbers and legends stay in Segoe UI (`NUMBER_FAMILY`).
+
+### Screenshots (extension)
+Popup / Alt+Shift+Y / right-click → `background.screenshot(tab, mode)`. Full page: content.js `shot-begin` hides scrollbars, turns sticky elements static and picks the scrolling element (the window, or the biggest scrolling panel when the page itself doesn't scroll); the background asks for `shot-scroll` one screen at a time (fixed elements hidden from the second screen on), captures with `tabs.captureVisibleTab` at most twice a second (Chrome's quota), and `shot-end` puts everything back. Area: content.js draws the selection overlay. Captures go to IndexedDB (`ShotDB`, last 6 kept) and `shot.html#<id>` stitches them (scaled down only past canvas limits), edits (shapes in picture coordinates, undo = list snapshots) and saves (PNG/JPG via `<a download>`, PDF via `pdf.js`). Messages to the page go to frame 0 only. Pages the browser protects get a clear message in the editor. The extension test (headless Edge over CDP) lives outside the repo; branded Chrome ignores `--load-extension`.
 
 ### Photos and posts
 `gallery.fetch_media_info()` runs yt-dlp and (for `SOCIAL` hosts, or when yt-dlp finds nothing) gallery-dl side by side; a post with photos gets an extra quality-list entry whose format is `gallery.OPTION` ("gallery"). Choosing it calls `MainWindow.save_post()` → `gallery.take()` (the cached listing; signed links expire) → `manager.add_gallery()`, one queued item per file (`ytdl:` entries become video items). gallery-dl is a separate program in `tools\` (GPL, so it's not bundled into the exe). Its GitHub releases carry no files any more: `tools._install_gallery_dl` takes the newest stable `gallery-dl.exe` from Codeberg's API, falls back to the official nightly build (gdl-org/builds), and keeps the first copy that runs `--version`; the dev venv's `gallery-dl.exe` is found too (`pip install gallery-dl`, test-only). The page's cookies go to gallery-dl as a temporary cookies.txt and are only forwarded to media URLs on the same site.

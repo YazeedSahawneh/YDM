@@ -1,4 +1,12 @@
-"""The progress bar: a sci-fi HUD gauge.
+"""The progress bar, in three styles (theme.BAR, picked in Options → Appearance):
+
+cells (Studio) — a sci-fi HUD gauge, described below.
+line (Simple)  — a thin rounded track that fills smoothly with the percentage.
+pill (Modern)  — a rounded pill with a soft gradient and, on the big version, stripes drifting
+                 across while bytes arrive.
+Only the HUD gauge shows the individual connections; the other two stay calm.
+
+The HUD gauge:
 
 Upright cells between two brackets. Each cell is one slice of the file and
 lights up as that slice arrives (straight from the real segment map), so you
@@ -12,7 +20,7 @@ from __future__ import annotations
 import time
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QPainter, QPolygonF
+from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ..engine import DownloadItem, Status
@@ -29,6 +37,88 @@ def _bracket(p: QPainter, rect: QRectF, left: bool, color: QColor) -> None:
     p.drawLine(QPointF(x, rect.top()), QPointF(x, rect.bottom()))
     p.drawLine(QPointF(x, rect.top()), QPointF(x + arm, rect.top()))
     p.drawLine(QPointF(x, rect.bottom()), QPointF(x + arm, rect.bottom()))
+
+
+def _state(item: DownloadItem | None, fraction: float | None, status: str | None):
+    """(status, fraction, colour, live, size unknown) for any bar style."""
+    st = status or (item.status if item else Status.DOWNLOADING)
+    if item is not None and item.missing:
+        st = Status.ERROR                          # finished, but the file was deleted or moved
+    frac = fraction if fraction is not None else (item.progress if item else 0.0)
+    color = theme.progress_color(frac, Status.DOWNLOADING if st in (Status.CONNECTING, Status.PROCESSING) else st,
+                                 BAR_MODE[0])
+    live = st in Status.ACTIVE
+    return st, frac, color, live, item is not None and live and item.total <= 0
+
+
+def draw_bar(p: QPainter, rect: QRectF, item: DownloadItem | None, *, big: bool = False, sweep: float | None = None,
+             fraction: float | None = None, status: str | None = None) -> QColor:
+    """The progress bar in the chosen style; returns the colour used (for the percentage readout)."""
+    if theme.BAR == "line":
+        return _draw_line(p, rect, item, big, fraction, status)
+    if theme.BAR == "pill":
+        return _draw_pill(p, rect, item, big, fraction, status)
+    return draw_hud_bar(p, rect, item, cell=7 if big else 5, gap=2.5 if big else 2.0, sweep=sweep,
+                        fraction=fraction, status=status)
+
+
+def _fill_path(track: QRectF, frac: float, unknown: bool, h: float) -> QPainterPath:
+    path = QPainterPath()
+    if unknown:                                    # size unknown: a short stretch glides across
+        t = (time.monotonic() * 0.6) % 1.4 - 0.4
+        path.addRoundedRect(QRectF(track.left() + t * track.width(), track.top(), track.width() * 0.3, h),
+                            h / 2, h / 2)
+    elif frac > 0:
+        w = max(h, min(1.0, frac) * track.width())
+        path.addRoundedRect(QRectF(track.left(), track.top(), w, h), h / 2, h / 2)
+    return path
+
+
+def _draw_line(p: QPainter, rect: QRectF, item, big: bool, fraction, status) -> QColor:
+    _st, frac, color, _live, unknown = _state(item, fraction, status)
+    h = 6.0 if big else 4.0
+    track = QRectF(rect.left(), rect.center().y() - h / 2, rect.width(), h)
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    clip = QPainterPath()
+    clip.addRoundedRect(track, h / 2, h / 2)
+    p.fillPath(clip, QColor(theme.UNLIT))
+    p.setClipPath(clip)
+    p.fillPath(_fill_path(track, frac, unknown, h), color)
+    p.restore()
+    return color
+
+
+def _draw_pill(p: QPainter, rect: QRectF, item, big: bool, fraction, status) -> QColor:
+    _st, frac, color, live, unknown = _state(item, fraction, status)
+    h = min(rect.height(), 16.0 if big else 12.0)
+    track = QRectF(rect.left(), rect.center().y() - h / 2, rect.width(), h)
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    clip = QPainterPath()
+    clip.addRoundedRect(track, h / 2, h / 2)
+    p.fillPath(clip, QColor(theme.UNLIT))
+    p.setClipPath(clip)
+    grad = QLinearGradient(0, track.top(), 0, track.bottom())
+    grad.setColorAt(0.0, QColor(color).lighter(125))
+    grad.setColorAt(1.0, color)
+    fill = _fill_path(track, frac, unknown, h)
+    p.fillPath(fill, grad)
+    if big and live and not unknown and not fill.isEmpty():
+        # stripes drifting to the right over the filled part, only while it runs
+        p.save()
+        p.setClipPath(fill, Qt.IntersectClip)
+        p.setPen(QPen(QColor(255, 255, 255, 38), h * 0.32))
+        step = h * 1.4
+        x = track.left() - h + (time.monotonic() * 22) % step
+        while x < track.right() + h:
+            p.drawLine(QPointF(x, track.bottom() + 1), QPointF(x + h, track.top() - 1))
+            x += step
+        p.restore()
+    p.restore()
+    return color
 
 
 def draw_hud_bar(p: QPainter, rect: QRectF, item: DownloadItem | None, *, cell: float = 5.0, gap: float = 2.0,
@@ -134,6 +224,13 @@ class HudBar(QWidget):
         text_w = 86 if self.readout else 0
         bar = QRectF(0, 3, w - text_w - (10 if text_w else 0), 22)
         sweep = (time.monotonic() % 1.8) / 1.8 if item and item.status == Status.DOWNLOADING else None
+        if theme.BAR != "cells":                     # line / pill: just the bar and the percentage
+            bar = QRectF(0, 0, w - text_w - (14 if text_w else 0), 30)
+            color = draw_bar(p, bar, item, big=True, fraction=0 if item is None else None,
+                             status=Status.QUEUED if item is None else None)
+            self._readout(p, item, color, w, text_w)
+            p.end()
+            return
         if item is None:
             color = draw_hud_bar(p, bar, None, cell=7, gap=2.5, fraction=0, status=Status.QUEUED)
         else:
@@ -154,12 +251,16 @@ class HudBar(QWidget):
                     x = left + (right - left) * s.pos / item.total
                     p.drawPolygon(QPolygonF([QPointF(x, y), QPointF(x - 3.5, y + 6), QPointF(x + 3.5, y + 6)]))
 
-        if self.readout:
-            known = item is not None and (item.total > 0 or item.status == Status.COMPLETED)
-            pct = item.progress * 100 if known else 0.0
-            text = (f"{pct:.0f}%" if pct >= 99.95 or pct == 0 else f"{pct:.1f}%") if known else "—"
-            p.setFont(self._pct)
-            p.setPen(color if known and item.status != Status.QUEUED else QColor(theme.MUTED))
-            p.drawText(QRectF(w - text_w, 0, text_w, 30), Qt.AlignRight | Qt.AlignVCenter, text)
+        self._readout(p, item, color, w, text_w)
         p.end()
+
+    def _readout(self, p: QPainter, item, color: QColor, w: int, text_w: int) -> None:
+        if not self.readout:
+            return
+        known = item is not None and (item.total > 0 or item.status == Status.COMPLETED)
+        pct = item.progress * 100 if known else 0.0
+        text = (f"{pct:.0f}%" if pct >= 99.95 or pct == 0 else f"{pct:.1f}%") if known else "—"
+        p.setFont(self._pct)
+        p.setPen(color if known and item.status != Status.QUEUED else QColor(theme.MUTED))
+        p.drawText(QRectF(w - text_w, 0, text_w, 30), Qt.AlignRight | Qt.AlignVCenter, text)
 

@@ -56,6 +56,7 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     app.setStyle("Fusion")
     theme.set_mode(settings.ui_mode)
+    theme.set_design(settings.design, settings.bar_style, settings.icon_style)
     theme.set_colors(settings.accent, settings.signal)
     hudbar.BAR_MODE[0] = settings.bar_colors
     app.setPalette(theme.palette())
