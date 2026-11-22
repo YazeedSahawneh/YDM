@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YDM Integration",
-  "version": "1.7.0",
+  "version": "1.7.1",
   "description": "Hands browser downloads and videos to YDM, your desktop download manager, and takes full-page screenshots.",
   "permissions": ["downloads", "contextMenus", "cookies", "storage", "webRequest", "tabs", "scripting"],
   "host_permissions": ["<all_urls>"],

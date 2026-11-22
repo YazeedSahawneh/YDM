@@ -472,25 +472,64 @@
     return { total: de.scrollHeight, view: innerHeight, rect: { x: 0, y: 0, w: de.clientWidth, h: innerHeight } };
   }
 
+  // Scrolling for a capture must land at once: sites that turn on smooth scrolling (CSS or script) would
+  // otherwise still be gliding when the screen is taken, and the screens wouldn't line up.
+  const scrollPos = () => (shot && shot.scroller ? shot.scroller.scrollTop : scrollY);
+  function jump(y) {
+    if (shot && shot.scroller) shot.scroller.scrollTo({ top: y, behavior: "instant" });
+    else window.scrollTo({ top: y, left: shot ? shot.scrollX : scrollX, behavior: "instant" });
+  }
+  async function settled(limit = 40) {            // the position stops changing (scripts that animate it)
+    let last = scrollPos(), still = 0;
+    for (let i = 0; i < limit && still < 2; i++) {
+      await new Promise((r) => requestAnimationFrame(r));
+      const now = scrollPos();
+      still = now === last ? still + 1 : 0;
+      last = now;
+    }
+  }
+  function picturesReady(ms) {                    // pictures on screen finish loading before the shot
+    const pending = [...document.images].filter((img) => {
+      if (img.complete) return false;
+      const r = img.getBoundingClientRect();
+      return r.bottom > 0 && r.top < innerHeight && r.width > 0;
+    });
+    if (!pending.length) return Promise.resolve();
+    return Promise.race([Promise.all(pending.map((img) => img.decode().catch(() => {}))), wait(ms)]);
+  }
+  function setStyle(list, e, prop, value) {
+    list.push([e, prop, e.style.getPropertyValue(prop), e.style.getPropertyPriority(prop)]);
+    e.style.setProperty(prop, value, "important");
+  }
+
   async function shotBegin() {
     if (shot) await shotEnd();
     capturing = true;
     host.style.display = "none";
     const de = document.scrollingElement || document.documentElement;
-    shot = { scrollX, scrollY, scroller: pickScroller(), sticky: [], fixed: [], style: document.createElement("style") };
+    shot = { scrollX, scrollY, scroller: pickScroller(), changed: [], fixedTop: [], style: document.createElement("style") };
     shot.top = shot.scroller ? shot.scroller.scrollTop : 0;
-    // no smooth scrolling, no scrollbars in the picture
-    shot.style.textContent = "html,body{scroll-behavior:auto!important;scrollbar-width:none!important}" +
+    // no smooth scrolling anywhere, no scrollbars in the picture (":root *" outranks a site's "html { … !important }")
+    shot.style.textContent = ":root,:root *{scroll-behavior:auto!important}:root,:root body{scrollbar-width:none!important}" +
       "::-webkit-scrollbar{display:none!important;width:0!important;height:0!important}";
     (document.head || document.documentElement).append(shot.style);
-    // sticky bars would repeat on every screen: they stay where they are in the page instead
-    forEachStyled((p) => p === "sticky", (e) => {
-      shot.sticky.push([e, e.style.getPropertyValue("position"), e.style.getPropertyPriority("position")]);
-      e.style.setProperty("position", "static", "important");
+    for (const e of [document.documentElement, document.body, shot.scroller]) {
+      if (e) setStyle(shot.changed, e, "scroll-behavior", "auto");
+    }
+    // sticky bars would repeat on every screen: they stay where they are in the page instead.
+    // Fixed things at the bottom of the screen (cookie bars, chat bubbles) would land mid-page: hidden.
+    // Fixed things at the top (headers) show on the first screen only.
+    forEachStyled((p) => p === "sticky" || p === "fixed", (e) => {
+      if (e === host || e === picker) return;
+      if (getComputedStyle(e).position === "sticky") return setStyle(shot.changed, e, "position", "static");
+      const r = e.getBoundingClientRect();
+      if (r.top >= innerHeight / 2) setStyle(shot.changed, e, "visibility", "hidden");
+      else shot.fixedTop.push(e);
     });
-    if (shot.scroller) shot.scroller.scrollTop = 0; else window.scrollTo(0, 0);
+    jump(0);
     await nextFrame();
-    await wait(150);
+    await settled();
+    await picturesReady(400);
     return { ...measure(), vw: innerWidth, dpr: devicePixelRatio, title: document.title, url: location.href,
              inner: !!shot.scroller, de: de.clientWidth };
   }
@@ -498,27 +537,23 @@
   async function shotScroll(y, index) {
     if (!shot) return null;
     if (index === 1 && !shot.scroller) {
-      // fixed headers and chat bubbles: in the first screen only
-      forEachStyled((p) => p === "fixed", (e) => {
-        if (e === host || e === picker) return;
-        shot.fixed.push([e, e.style.getPropertyValue("visibility"), e.style.getPropertyPriority("visibility")]);
-        e.style.setProperty("visibility", "hidden", "important");
-      });
+      for (const e of shot.fixedTop) setStyle(shot.changed, e, "visibility", "hidden");
     }
-    if (shot.scroller) shot.scroller.scrollTop = y; else window.scrollTo(0, y);
+    jump(y);
     await nextFrame();
-    await wait(160);                              // lazy pictures get a moment to appear
+    await settled();
+    await picturesReady(400);                     // lazy pictures get a moment to appear
     const m = measure();
-    return { y: shot.scroller ? shot.scroller.scrollTop : scrollY, total: m.total };
+    return { y: scrollPos(), total: m.total };
   }
 
   async function shotEnd() {
     if (!shot) return true;
-    for (const [e, v, p] of shot.sticky) v ? e.style.setProperty("position", v, p) : e.style.removeProperty("position");
-    for (const [e, v, p] of shot.fixed) v ? e.style.setProperty("visibility", v, p) : e.style.removeProperty("visibility");
-    shot.style.remove();
-    if (shot.scroller) shot.scroller.scrollTop = shot.top;
-    window.scrollTo(shot.scrollX, shot.scrollY);
+    const s = shot;
+    if (s.scroller) s.scroller.scrollTo({ top: s.top, behavior: "instant" });
+    window.scrollTo({ top: s.scrollY, left: s.scrollX, behavior: "instant" });
+    for (const [e, prop, v, p] of s.changed.reverse()) v ? e.style.setProperty(prop, v, p) : e.style.removeProperty(prop);
+    s.style.remove();
     shot = null;
     capturing = false;
     return true;

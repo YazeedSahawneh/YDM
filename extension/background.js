@@ -248,6 +248,8 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 // The page scrolls itself one screen at a time (content.js), each screen is captured here, the screens
 // go to IndexedDB (shotdb.js) and shot.html stitches, edits and saves them.
 const SHOT_MAX_FRAMES = 60;       // a very long page (endless feeds) stops there, and says so
+// Chrome allows two captures a second; Firefox has no such limit
+const SHOT_GAP = /firefox/i.test(navigator.userAgent) ? 0 : 505;
 let shooting = false, lastCapture = 0;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const toPage = (tabId, msg) => chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
@@ -266,13 +268,16 @@ async function pageReady(tabId) {
   } catch { return false; }
 }
 
-async function grab(windowId) {
-  const gap = 600 - (Date.now() - lastCapture);  // Chrome allows two captures a second
+// Takes the screen as soon as the quota allows; turning it into a Blob runs on in the background
+// ({ blob: promise }: an async function would wait for a returned promise), so the page can already scroll on.
+async function shoot(windowId) {
+  const gap = SHOT_GAP - (Date.now() - lastCapture);
   if (gap > 0) await sleep(gap);
   lastCapture = Date.now();
   const url = await chrome.tabs.captureVisibleTab(windowId, { format: "png" });
-  return (await fetch(url)).blob();
+  return { blob: fetch(url).then((r) => r.blob()) };
 }
+const grab = async (windowId) => (await shoot(windowId)).blob;
 
 function shotBadge(tabId, text) {
   chrome.action.setBadgeBackgroundColor({ color: "#3DDBC0", tabId }).catch(() => {});
@@ -300,7 +305,7 @@ async function screenshot(tab, mode) {
       mode = rec.mode = "visible";
     }
     const info = ready ? await toPage(tab.id, { type: "shot-ping" }) : null;
-    if (info) rec.vw = info.w;
+    if (info) { rec.vw = info.w; rec.dpr = info.dpr; }
     if (mode === "area") {
       const rect = await toPage(tab.id, { type: "shot-select" });
       if (!rect) return;                          // Esc: nothing to show
@@ -311,24 +316,39 @@ async function screenshot(tab, mode) {
     } else {
       const m = await toPage(tab.id, { type: "shot-begin" });
       began = true;
-      Object.assign(rec, { vw: m.vw, rect: m.rect, inner: m.inner, title: m.title || rec.title });
+      Object.assign(rec, { vw: m.vw, dpr: m.dpr, rect: m.rect, inner: m.inner, title: m.title || rec.title });
+      // Each step is a whole number of screen pixels (with 125 % scaling: a multiple of 4 page pixels), so every
+      // screen is drawn exactly like the page itself, and 10 px less than a screen: the next screen covers the
+      // last row of the one before (at 125 % that row is only half drawn) and the editor can check the join.
+      const unit = [1, 2, 3, 4, 5, 6, 7, 8].find((n) => Math.abs(n * m.dpr - Math.round(n * m.dpr)) < 0.01) || 1;
+      const step = Math.max(unit, Math.floor((m.view - 10) / unit) * unit);
       let y = 0, total = m.total, last = -1;
-      for (let i = 0; ; i++) {
-        const r = await toPage(tab.id, { type: "shot-scroll", y, index: i });
-        if (!r) throw new Error("The page stopped answering.");
-        if (!(await chrome.tabs.get(tab.id)).active) throw new Error("You switched tabs, so the capture stopped.");
-        if (r.y <= last) break;                   // it doesn't scroll any further
-        rec.frames.push({ y: r.y, blob: await grab(tab.windowId) });
-        last = r.y;
-        total = r.total;
-        shotBadge(tab.id, `${Math.min(99, Math.round(((r.y + m.view) / total) * 100))}%`);
-        if (r.y + m.view >= total - 1) break;
-        if (rec.frames.length >= SHOT_MAX_FRAMES) {
-          rec.note = `The page is very long: its first ${rec.frames.length} screens were captured.`;
-          total = r.y + m.view;
-          break;
+      const pending = [];                         // [scroll position, Blob promise] per screen
+      rec.timing = [];
+      try {
+        for (let i = 0; ; i++) {
+          const t0 = Date.now();
+          const r = await toPage(tab.id, { type: "shot-scroll", y, index: i });
+          if (!r) throw new Error("The page stopped answering.");
+          if (!(await chrome.tabs.get(tab.id)).active) throw new Error("You switched tabs, so the capture stopped.");
+          if (r.y <= last) break;                 // it doesn't scroll any further
+          const t1 = Date.now();
+          pending.push([r.y, (await shoot(tab.windowId)).blob]);
+          rec.timing.push([t1 - t0, Date.now() - t1]);
+          last = r.y;
+          total = r.total;
+          shotBadge(tab.id, `${Math.min(99, Math.round(((r.y + m.view) / total) * 100))}%`);
+          if (r.y + m.view >= total - 1) break;
+          if (pending.length >= SHOT_MAX_FRAMES) {
+            rec.note = `The page is very long: its first ${pending.length} screens were captured.`;
+            total = r.y + m.view;
+            break;
+          }
+          y = (i + 1) * step;
         }
-        y = r.y + m.view;
+      } finally {
+        for (const [y0, blob] of pending) rec.frames.push({ y: y0, blob: await blob.catch(() => null) });
+        rec.frames = rec.frames.filter((f) => f.blob);
       }
       rec.total = total;
     }

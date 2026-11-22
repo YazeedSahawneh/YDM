@@ -103,14 +103,21 @@
   async function stitch() {
     const frames = rec.frames;
     const first = await createImageBitmap(frames[0].blob);
-    const s = first.width / (rec.vw || first.width);       // picture pixels per page pixel (screen scaling × zoom)
+    // picture pixels per page pixel (screen scaling × zoom): the page's own devicePixelRatio when the screen
+    // matches it (width / width is off by rounding: 1573 / 1258 isn't 1.25, and that adds up down a long page)
+    const ratio = first.width / (rec.vw || first.width);
+    const s = rec.dpr && Math.abs(first.width - rec.vw * rec.dpr) <= 1 ? rec.dpr : ratio;
+    // Everything in whole screen pixels: a screen taken at scroll position y starts at round(y × s) in the
+    // picture, exactly where the browser drew it, so the screens meet without a seam.
+    const px = (v) => Math.round(v * s);
     let outW, outH;
     if (rec.mode === "full") {
-      outW = rec.rect.w * s;
-      outH = rec.total * s;
+      const last = frames[frames.length - 1];
+      outW = Math.min(px(rec.rect.w), first.width - px(rec.rect.x));                 // never past the screens
+      outH = Math.min(px(rec.total), px(last.y) + Math.min(px(rec.rect.h), first.height - px(rec.rect.y)));
     } else if (rec.mode === "area") {
-      outW = rec.crop.w * s;
-      outH = rec.crop.h * s;
+      outW = px(rec.crop.w);
+      outH = px(rec.crop.h);
     } else {
       outW = first.width;
       outH = first.height;
@@ -120,17 +127,27 @@
     W = base.width;
     H = base.height;
     S = s * k;
-    const ctx = base.getContext("2d");
+    const ctx = base.getContext("2d", { willReadFrequently: true });
     ctx.imageSmoothingQuality = "high";
+    let covered = 0;                               // picture rows filled so far (full page)
     for (let i = 0; i < frames.length; i++) {
       const bmp = i === 0 ? first : await createImageBitmap(frames[i].blob);
       if (rec.mode === "full") {
         const r = rec.rect;
-        const sh = Math.min(bmp.height - r.y * s, r.h * s);
-        ctx.drawImage(bmp, r.x * s, r.y * s, r.w * s, sh, 0, Math.floor(frames[i].y * s * k), W, Math.ceil(sh * k));
+        const sx = px(r.x), sy = px(r.y), sw = Math.min(outW, bmp.width - sx), sh = Math.min(px(r.h), bmp.height - sy);
+        let dy = px(frames[i].y);
+        if (k === 1) {
+          if (i > 0) dy = register(ctx, bmp, sx, sy, sw, dy, covered);
+          // only what's new: the screen before keeps its rows, except the last two (they can be half drawn)
+          const from = i === 0 ? 0 : Math.max(0, Math.min(sh, covered - 2 - dy));
+          ctx.drawImage(bmp, sx, sy + from, sw, sh - from, 0, dy + from, sw, sh - from);
+        } else {
+          ctx.drawImage(bmp, sx, sy, sw, sh, 0, Math.round(dy * k), Math.round(sw * k), Math.round(sh * k) + 1);
+        }
+        covered = Math.max(covered, dy + sh);
       } else if (rec.mode === "area") {
         const c = rec.crop;
-        ctx.drawImage(bmp, c.x * s, c.y * s, c.w * s, c.h * s, 0, 0, W, H);
+        ctx.drawImage(bmp, px(c.x), px(c.y), outW, outH, 0, 0, W, H);
       } else {
         ctx.drawImage(bmp, 0, 0, W, H);
       }
@@ -139,15 +156,54 @@
     return k;
   }
 
+  // Where does this screen really belong? Its first rows must repeat the rows the screen before already
+  // put in the picture. Try the computed spot and up to 3 rows either side; keep the computed one unless
+  // another fits clearly better (blank stretches fit everywhere, so they keep it too).
+  const joins = [];                              // [computed row, correction, mean difference] per join
+  function register(ctx, bmp, sx, sy, sw, dy, covered) {
+    const n = Math.min(16, covered - 2 - dy);
+    if (n < 2) return dy;
+    const probe = canvas(sw, n);
+    const px = probe.getContext("2d", { willReadFrequently: true });
+    px.drawImage(bmp, sx, sy, sw, n, 0, 0, sw, n);
+    const a = px.getImageData(0, 0, sw, n).data;
+    const score = (d) => {
+      if (dy + d < 0 || dy + d + n > covered - 2) return Infinity;
+      const b = ctx.getImageData(0, dy + d, sw, n).data;
+      let diff = 0;
+      for (let i = 0; i < a.length; i += 8) diff += Math.abs(a[i] - b[i]) + Math.abs(a[i + 1] - b[i + 1]) + Math.abs(a[i + 2] - b[i + 2]);
+      return diff;
+    };
+    let best = 0, bestScore = score(0);
+    for (const d of [-1, 1, -2, 2, -3, 3]) {
+      const s = score(d);
+      if (s < bestScore * 0.5) { best = d; bestScore = s; }
+    }
+    joins.push([dy, best, Math.round(bestScore / (a.length / 8 * 3) * 100) / 100]);   // for the test
+    return dy + best;
+  }
+
   // ---- layout and drawing --------------------------------------------------------------------------------
+  let layouts = 0;                               // how many times it was laid out (the test checks it settles)
   function layout() {
+    layouts++;
     const a = area();
-    const cw = stage.clientWidth, ch = stage.clientHeight;
-    const sw = Math.max(cw, a.w * z + PAD * 2), sh = Math.max(ch, a.h * z + PAD * 2);
+    // size the scroll area from the window, then again from what's left beside any scrollbars: it never
+    // grows from its own scrollbars, so it can't rock back and forth
+    const box = $("viewport");
+    let cw = box.clientWidth, ch = box.clientHeight;
+    const cwW = a.w * z + PAD * 2, chH = a.h * z + PAD * 2;
+    for (let pass = 0; pass < 2; pass++) {
+      spacer.style.width = `${Math.floor(Math.max(cw, cwW))}px`;
+      spacer.style.height = `${Math.floor(Math.max(ch, chH))}px`;
+      cw = stage.clientWidth;
+      ch = stage.clientHeight;
+    }
+    const sw = Math.floor(Math.max(cw, cwW)), sh = Math.floor(Math.max(ch, chH));
     spacer.style.width = `${sw}px`;
     spacer.style.height = `${sh}px`;
-    offX = (sw - a.w * z) / 2;
-    offY = (sh - a.h * z) / 2;
+    offX = Math.round((sw - a.w * z) / 2);
+    offY = Math.round((sh - a.h * z) / 2);
     const dpr = dprNow();
     view.style.width = `${cw}px`;
     view.style.height = `${ch}px`;
@@ -584,7 +640,12 @@
     e.preventDefault();
     setZoom(z * Math.exp(-e.deltaY * 0.0015), e.clientX, e.clientY);
   }, { passive: false });
-  new ResizeObserver(() => { if (base) layout(); }).observe(stage);
+  // the window, not the scroll area: the scroll area changes size whenever its scrollbars come and go
+  let lastBox = "";
+  new ResizeObserver(() => {
+    const now = `${$("viewport").clientWidth}x${$("viewport").clientHeight}`;
+    if (base && now !== lastBox) { lastBox = now; layout(); }
+  }).observe($("viewport"));
 
   // ---- saving --------------------------------------------------------------------------------------------
   function compose(background) {
@@ -801,7 +862,7 @@
 
   // the test harness reads the state through this; nothing else uses it
   window.__ydmShot = { get state() { return { W, H, S, z, tool, doc, undo: undoStack.length, redo: redoStack.length,
-                                              mode: rec && rec.mode, ready: !$("loading").hidden ? false : true }; },
+                                              mode: rec && rec.mode, layouts, joins, ready: !$("loading").hidden ? false : true }; },
                        compose };
   start();
 })();
