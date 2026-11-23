@@ -49,10 +49,16 @@ Options → Appearance offers three designs (`theme.DESIGNS`); each sets its own
 - **Studio** (default): everything described above. Radius 6, rows 34, HUD cells, line icons (1.7 strokes).
 - **Simple**: neutral greys without the graphite tint (dark #141414 / light #FFFFFF), radius 4, rows 30, a 4 px (6 px big) rounded line that fills smoothly, thin icons (1.15 strokes, solid shapes outlined, dots stay solid).
 - **Modern**: cool slate (dark #0E1320 / light #EEF2F9), radius 10 (sidebar items rounded too), rows 40, Segoe UI Variable Text, a 12 px (16 px big) pill with a light-to-colour gradient and, on the big bar while bytes arrive, white stripes drifting right; duotone icons (a 28 % tint inside every closed outline).
-Only the HUD gauge shows the individual connections; the line and the pill stay calm. Settings pages scroll when they're taller than the window.
+- **Terminal**: green phosphor on near-black (dark #070B07, text #B6F2A8) or a printout look (light #F3F1E4), radius 0, rows 30, Cascadia Mono (Consolas) for text (toolbar labels and numbers stay in Segoe UI so they fit), thin icons; the bar is a text-mode meter: brackets, solid blocks, the last block in eighths like ▏▎▍▌, the rest in a dotted shade (Qt.Dense5Pattern of FAINT).
+- **Ocean**: deep-sea blues (dark #061A24 / light #EAF6F8), radius 8, rows 36, duotone icons; the bar is liquid in a rounded tube: the front edge is a sine wave standing on its side, with a second, paler wave just ahead of it, both drifting while bytes arrive.
+- **Beads** (bar style, any design): a string of beads, one per slice of the file, lit from the real segment map like the HUD cells; a ring marks the bead a connection is writing.
+The HUD gauge and the beads show the individual connections; the line, pill, blocks and wave stay calm. Design cards sit three to a row. Settings pages scroll when they're taller than the window.
 
 ## Screenshot editor (extension)
 `shot.html` uses the extension's own tokens (graphite, amber pressables, teal signal). Header: page title and size, then Copy · PNG (primary) · JPG · PDF with a page-size menu. Tool rail: icon tools in the app's drawing (24 grid, 1.7 strokes), seven colour swatches plus any colour, three sizes, undo/redo, zoom. The picture sits on a near-black stage with a soft shadow; only the part on screen is drawn, so very long pages stay smooth.
+
+## Text editor (extension)
+`text.html` shares the screenshot editor's tokens. Code in Cascadia Mono on a near-black ground (#0F1114), line numbers in FAINT, the line of the first problem marked in the gutter (error ink) and across the text. Syntax colours: keys #7CC8FF, strings #A6E35A, numbers #FFB547, true/false/null #B69CFF, comments FAINT italic, XML tags #FF8A9B, attributes #FFD27A. The check is a pill next to the language list (lime dot when valid, error ink with the message when not; click it to jump there). Tools open as a centred palette with a search field and grouped list. Dialogs (password, "save anyway?") are cards over a dark scrim.
 
 ## Components
 - Toolbar: icon over label, transparent until hover (RAISED + LINE). Add URL in amber text.

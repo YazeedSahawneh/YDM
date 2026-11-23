@@ -1,27 +1,78 @@
 {
   "manifest_version": 3,
   "name": "YDM Integration",
-  "version": "1.7.1",
-  "description": "Hands browser downloads and videos to YDM, your desktop download manager, and takes full-page screenshots.",
-  "permissions": ["downloads", "contextMenus", "cookies", "storage", "webRequest", "tabs", "scripting"],
-  "host_permissions": ["<all_urls>"],
-  "background": { "service_worker": "background.js", "scripts": ["shotdb.js", "background.js"] },
-  "browser_specific_settings": { "gecko": { "id": "ydm-integration@yazeedsahawneh", "strict_min_version": "121.0" } },
-  "content_scripts": [{
-    "matches": ["http://*/*", "https://*/*"],
-    "js": ["content.js"],
-    "all_frames": true,
-    "run_at": "document_idle"
-  }],
+  "version": "1.8.0",
+  "description": "Hands browser downloads and videos to YDM, takes full-page screenshots, and edits copied text (Copy with YDM).",
+  "permissions": [
+    "downloads",
+    "contextMenus",
+    "cookies",
+    "storage",
+    "webRequest",
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "scripts": [
+      "shotdb.js",
+      "background.js"
+    ]
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "ydm-integration@yazeedsahawneh",
+      "strict_min_version": "121.0"
+    }
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "all_frames": true,
+      "run_at": "document_idle"
+    }
+  ],
   "commands": {
-    "shot-full": { "suggested_key": { "default": "Alt+Shift+Y" }, "description": "Screenshot of the whole page" },
-    "shot-visible": { "description": "Screenshot of the visible part" },
-    "shot-area": { "description": "Screenshot of an area" }
+    "shot-full": {
+      "suggested_key": {
+        "default": "Alt+Shift+Y"
+      },
+      "description": "Screenshot of the whole page"
+    },
+    "shot-visible": {
+      "description": "Screenshot of the visible part"
+    },
+    "shot-area": {
+      "description": "Screenshot of an area"
+    },
+    "text-copy": {
+      "suggested_key": {
+        "default": "Alt+Shift+T"
+      },
+      "description": "Copy the selected text into the YDM text editor"
+    }
   },
   "action": {
     "default_title": "YDM",
     "default_popup": "popup.html",
-    "default_icon": { "16": "icons/icon16.png", "32": "icons/icon32.png", "48": "icons/icon48.png" }
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png"
+    }
   },
-  "icons": { "16": "icons/icon16.png", "48": "icons/icon48.png", "128": "icons/icon128.png" }
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
 }

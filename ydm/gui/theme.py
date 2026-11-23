@@ -102,7 +102,32 @@ DESIGNS = {
                              "ROW_LINE": "#E3E9F2", "EDGE": "#B5C0D3", "HOVER": "#F7F9FD", "SCROLL": "#C3CCDB",
                              "SCROLL_HOVER": "#A9B4C6", "BANNER": "#E2EAF8", "SELECT_BASE": "#E8EEF9"}}},
 }
-BAR_STYLES = {"cells": "HUD cells", "line": "Thin line", "pill": "Pill"}
+DESIGNS["terminal"] = {
+    "label": "Terminal", "blurb": "Green phosphor, block meter", "bar": "blocks", "icons": "thin",
+    "radius": 0, "row": 30, "font": "Cascadia Mono|Consolas",
+    "grounds": {
+        "dark": {"BG": "#070B07", "PANEL": "#0B120B", "RAISED": "#111C11", "LINE": "#1C301C", "TEXT": "#B6F2A8",
+                 "MUTED": "#6FA567", "FAINT": "#3D6338", "UNLIT": "#132313", "ROW_LINE": "#0C150C", "EDGE": "#2A4A27",
+                 "HOVER": "#142414", "SCROLL": "#1F3A1D", "SCROLL_HOVER": "#2C5229", "BANNER": "#0E180E",
+                 "SELECT_BASE": "#0F1C0F"},
+        "light": {"BG": "#F3F1E4", "PANEL": "#E9E6D4", "RAISED": "#FBFAF2", "LINE": "#CFCBB3", "TEXT": "#1E3A1A",
+                  "MUTED": "#4F6B48", "FAINT": "#8E9A80", "UNLIT": "#DEDAC4", "ROW_LINE": "#E7E4D2", "EDGE": "#B5B096",
+                  "HOVER": "#F7F5EA", "SCROLL": "#C6C1A6", "SCROLL_HOVER": "#ACA68A", "BANNER": "#E4E0C8",
+                  "SELECT_BASE": "#ECE9D8"}}}
+DESIGNS["ocean"] = {
+    "label": "Ocean", "blurb": "Deep sea blues, liquid wave", "bar": "wave", "icons": "duotone",
+    "radius": 8, "row": 36, "font": "Segoe UI",
+    "grounds": {
+        "dark": {"BG": "#061A24", "PANEL": "#08212D", "RAISED": "#0D2D3B", "LINE": "#143A4A", "TEXT": "#E3F3F6",
+                 "MUTED": "#88AAB4", "FAINT": "#4E7380", "UNLIT": "#0E3140", "ROW_LINE": "#071D28", "EDGE": "#235265",
+                 "HOVER": "#103545", "SCROLL": "#1A4456", "SCROLL_HOVER": "#255A70", "BANNER": "#0A2634",
+                 "SELECT_BASE": "#0B2A37"},
+        "light": {"BG": "#EAF6F8", "PANEL": "#FFFFFF", "RAISED": "#FFFFFF", "LINE": "#CFE3E8", "TEXT": "#0D2B36",
+                  "MUTED": "#4B6E79", "FAINT": "#93AEB6", "UNLIT": "#D6EAEF", "ROW_LINE": "#DEEEF2", "EDGE": "#A9C8D1",
+                  "HOVER": "#F5FBFC", "SCROLL": "#B9D3DA", "SCROLL_HOVER": "#9CBEC8", "BANNER": "#DDF0F4",
+                  "SELECT_BASE": "#E3F2F5"}}}
+BAR_STYLES = {"cells": "HUD cells", "line": "Thin line", "pill": "Pill", "blocks": "Terminal blocks",
+              "wave": "Liquid wave", "beads": "Beads"}
 ICON_STYLES = {"line": "Line", "thin": "Thin", "duotone": "Duotone"}
 DESIGN, BAR, ICONS, RADIUS, ROW = "studio", "cells", "line", 6, 34
 
@@ -169,12 +194,14 @@ def set_design(design: str, bar: str = "", icons: str = "") -> None:
     set_mode(_MODE_ASKED)
 
 
-def _installed(family: str) -> str:
+def _installed(families: str) -> str:
+    """The first of "A|B|…" that Windows has, else Segoe UI."""
     try:
         from PySide6.QtGui import QFontDatabase
-        return family if family in QFontDatabase.families() else "Segoe UI"
+        have = set(QFontDatabase.families())
     except Exception:  # noqa: BLE001 - no QGuiApplication yet
         return "Segoe UI"
+    return next((f for f in families.split("|") if f in have), "Segoe UI")
 
 
 def label_font(size: float = 7.5, weight: QFont.Weight = QFont.DemiBold) -> QFont:
@@ -303,6 +330,7 @@ QToolBar::separator {{ background: {LINE}; width: 1px; margin: 8px 6px; }}
 QToolBar QToolButton {{ background: transparent; border: 1px solid transparent; border-radius: {R}px;
                         padding: 5px 7px 4px 7px; color: {TEXT}; font-size: 8.5pt; min-width: 54px; }}
 QToolBar QToolButton:hover {{ background: {RAISED}; border-color: {LINE}; }}
+QToolBar QToolButton {{ font-family: "{NUMBER_FAMILY}"; }}  /* labels fit their buttons in every design (Terminal is monospace) */
 QToolBar QToolButton:pressed {{ background: {LINE}; }}
 QToolBar QToolButton:disabled {{ color: {FAINT}; }}
 QToolBar QToolButton#primary {{ color: {ACCENT_INK}; font-weight: 600; }}

@@ -61,6 +61,11 @@ async function init() {
     if (key) $("shotHint").textContent = `${key} takes the whole page. Then crop, draw, blur and save as PNG, JPG or PDF.`;
   }).catch(() => {});
 
+  $("textEditor").addEventListener("click", async () => {
+    await chrome.runtime.sendMessage({ type: "text-new" });
+    window.close();
+  });
+
   $("grab").addEventListener("click", async () => {
     if (!web) { $("hint").textContent = "Open a page with a video first."; return; }
     $("grab").disabled = true;

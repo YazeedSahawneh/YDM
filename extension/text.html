@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Text · YDM</title>
+<link rel="icon" href="icons/icon32.png">
+<link rel="stylesheet" href="text.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand">
+    <img src="icons/icon48.png" alt="">
+    <div class="what">
+      <div id="title">Text</div>
+      <div id="meta" class="muted"></div>
+    </div>
+  </div>
+  <div class="actions">
+    <button id="open" class="btn" title="Open a text file from your PC"></button>
+    <button id="copy" class="btn" title="Copy all the text (Ctrl+Shift+C)"></button>
+    <div class="split">
+      <button id="save" class="btn primary" title="Save as a file (Ctrl+S)"></button>
+      <button id="saveMore" class="btn primary caret" title="File type and name" aria-haspopup="menu"></button>
+      <div id="saveMenu" class="menu" role="menu" hidden>
+        <label class="name">File name <input id="fileName" spellcheck="false"></label>
+        <div id="saveTypes"></div>
+      </div>
+    </div>
+  </div>
+</header>
+
+<nav class="tools" aria-label="Text tools">
+  <select id="lang" title="What kind of text this is (checked as you type)">
+    <option value="auto">Auto</option><option value="json">JSON</option><option value="yaml">YAML</option>
+    <option value="xml">XML</option><option value="text">Plain text</option>
+  </select>
+  <button id="check" class="check" title="Click to go to the problem"><i></i><span>Checking…</span></button>
+  <span class="sep"></span>
+  <button id="plugins" class="btn" title="All the tools (Ctrl+Shift+P)"></button>
+  <button id="format" class="btn" title="Format JSON / YAML / XML (Shift+Alt+F)"></button>
+  <button id="secrets" class="btn" title="Hide passwords, keys and tokens"></button>
+  <button id="lock" class="btn" title="Encrypt with a password (AES-256)"></button>
+  <div class="spacer"></div>
+  <button id="find" class="icon" title="Find and replace (Ctrl+F / Ctrl+H)"></button>
+  <button id="wrap" class="icon" title="Wrap long lines (Alt+Z)" aria-pressed="false"></button>
+  <button id="smaller" class="icon" title="Smaller text (Ctrl+−)"></button>
+  <button id="bigger" class="icon" title="Bigger text (Ctrl++)"></button>
+  <button id="undo" class="icon" title="Undo (Ctrl+Z)"></button>
+  <button id="redo" class="icon" title="Redo (Ctrl+Y)"></button>
+</nav>
+
+<div id="findBar" class="findbar" hidden>
+  <input id="findText" placeholder="Find" spellcheck="false">
+  <input id="replaceText" placeholder="Replace with" spellcheck="false">
+  <button id="matchCase" class="toggle" title="Match case" aria-pressed="false">Aa</button>
+  <button id="useRegex" class="toggle" title="Regular expression" aria-pressed="false">.*</button>
+  <span id="findCount" class="muted"></span>
+  <button id="findPrev" class="icon" title="Previous (Shift+Enter)"></button>
+  <button id="findNext" class="icon" title="Next (Enter)"></button>
+  <button id="replaceOne" class="btn small">Replace</button>
+  <button id="replaceAll" class="btn small">Replace all</button>
+  <button id="findClose" class="icon" title="Close (Esc)"></button>
+</div>
+
+<main class="editor" id="editor">
+  <pre id="gutter" aria-hidden="true"></pre>
+  <div class="code">
+    <div id="lineMark" class="linemark" hidden></div>
+    <pre id="hl" aria-hidden="true"></pre>
+    <textarea id="ta" spellcheck="false" autocapitalize="off" autocomplete="off" wrap="off"
+              placeholder="Paste or type here, or right-click selected text on any page → Copy with YDM"></textarea>
+  </div>
+  <div id="drop" class="drop" hidden>Drop the file to open it</div>
+</main>
+
+<footer class="status">
+  <span id="pos">Ln 1, Col 1</span><span id="selInfo"></span>
+  <span class="grow"></span>
+  <span id="counts"></span><span id="eol">LF</span><span>UTF-8</span>
+</footer>
+
+<div id="palette" class="palette" hidden role="dialog" aria-label="Tools">
+  <div class="phead"><input id="paletteSearch" placeholder="Search the tools: base64, yaml, hash, sort…" spellcheck="false">
+    <div id="paletteScope" class="muted"></div></div>
+  <div id="paletteList" class="plist" role="listbox"></div>
+</div>
+
+<div id="modal" class="modal" hidden role="dialog" aria-modal="true">
+  <div class="card">
+    <div id="modalTitle" class="big"></div>
+    <div id="modalText" class="muted"></div>
+    <div id="modalFields"></div>
+    <div id="modalError" class="error"></div>
+    <div class="row">
+      <button id="modalCancel" class="btn">Cancel</button>
+      <button id="modalOk" class="btn primary">OK</button>
+    </div>
+  </div>
+</div>
+
+<input id="fileInput" type="file" hidden>
+<div id="toast" role="status" aria-live="polite"></div>
+
+<script src="shotdb.js"></script>
+<script src="yaml.js"></script>
+<script src="textkit.js"></script>
+<script src="text.js"></script>
+</body>
+</html>

@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 
 from PySide6.QtCore import QObject, QRectF, QRunnable, QSize, QThreadPool, QTime, QTimer, Qt, Signal
 from PySide6.QtGui import QColor, QPainter
-from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog, QFormLayout,
+from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QColorDialog, QComboBox, QDialog, QFileDialog, QFormLayout, QGridLayout,
                                QFrame, QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
                                QPushButton, QRadioButton, QScrollArea, QSpinBox, QStackedWidget, QTimeEdit,
                                QVBoxLayout, QWidget)
@@ -637,10 +637,10 @@ class SettingsDialog(Dialog):
         self._accent, self._signal = settings.accent, settings.signal
         self._saved_theme = (settings.accent, settings.signal, settings.bar_colors, settings.ui_mode,
                              settings.design, settings.bar_style, settings.icon_style)
-        design_row = QHBoxLayout()
+        design_row = QGridLayout()
         design_row.setSpacing(8)
         self.design_group = QButtonGroup(self)
-        for key, d in theme.DESIGNS.items():
+        for n, (key, d) in enumerate(theme.DESIGNS.items()):
             b = QPushButton(f"{d['label']}\n{d['blurb']}")
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
@@ -649,8 +649,7 @@ class SettingsDialog(Dialog):
             b.setStyleSheet(_card_qss())
             b.setChecked(settings.design == key)
             self.design_group.addButton(b)
-            design_row.addWidget(b)
-        design_row.addStretch(1)
+            design_row.addWidget(b, n // 3, n % 3)
         self.design_group.buttonClicked.connect(lambda _b: self._design_changed())
         af.addRow("Design", design_row)
         self.bar_style = QComboBox()

@@ -15,7 +15,8 @@
   const svg = (d) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" ` +
     `stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${d}</svg>`;
   const ICON = {
-    hand: '<path d="M8 12.5V6a1.5 1.5 0 0 1 3 0v5.5M11 11V4.5a1.5 1.5 0 0 1 3 0V11M14 11V6a1.5 1.5 0 0 1 3 0v8c0 3.6-2.6 6-6 6-2.6 0-4.1-1.3-5.4-3.5l-1.7-2.9a1.4 1.4 0 0 1 2.3-1.6L8 14"/>',
+    select: '<path d="M5.5 3.5l13 7.2-5.8 1.6-2.9 5.9z"/><path d="M12.8 12.4l4.7 5.6"/>',
+    ellipse: '<ellipse cx="12" cy="12" rx="8.5" ry="6.5"/>',
     crop: '<path d="M6 2.5V16a2 2 0 0 0 2 2h13.5M2.5 6H16a2 2 0 0 1 2 2v13.5"/>',
     pen: '<path d="M4 20l1-4L15.5 5.5a2.1 2.1 0 0 1 3 3L8 19z"/><path d="M13.5 7.5l3 3"/>',
     marker: '<path d="M9 15l-4 4h5l2-2"/><path d="M9 15l8.5-8.5a2.1 2.1 0 0 1 3 3L12 18z"/><path d="M14.5 21H20"/>',
@@ -36,8 +37,10 @@
     caret: '<path d="M7 10l5 5 5-5"/>',
   };
 
-  const TOOLS = [["hand", "Move around", "H"], ["crop", "Crop", "C"], ["pen", "Pen", "P"], ["marker", "Highlighter", "M"],
-                 ["arrow", "Arrow", "A"], ["box", "Box", "R"], ["text", "Text", "T"], ["blur", "Blur (hide private things)", "B"]];
+  const TOOLS = [["select", "Select: move shapes, double-click text to edit it, drag empty space to scroll", "V"],
+                 ["crop", "Crop", "C"], ["pen", "Pen", "P"], ["marker", "Highlighter", "M"], ["arrow", "Arrow", "A"],
+                 ["box", "Box (Shift: square)", "R"], ["ellipse", "Circle (Shift: perfect circle)", "O"], ["text", "Text", "T"],
+                 ["blur", "Blur (hide private things)", "B"]];
   const COLORS = [["#FF4D4D", "Red"], ["#FFB547", "Amber"], ["#FFE14D", "Yellow"], ["#3DDBC0", "Teal"],
                   ["#4DA3FF", "Blue"], ["#FFFFFF", "White"], ["#111111", "Black"]];
   const SIZES = [[2, "Thin"], [4, "Medium"], [8, "Thick"]];
@@ -49,7 +52,9 @@
   let S = 1;                         // picture pixels per page (CSS) pixel
   let z = 1;                         // zoom: screen pixels per picture pixel
   let offX = 0, offY = 0;            // where the picture starts inside the scrolling area
-  let tool = "hand", color = COLORS[0][0], size = 4;
+  let tool = "select", color = COLORS[0][0], size = 4;
+  let selected = -1;                 // index of the selected shape (Select tool), -1 = none
+  let moving = null;                 // a shape being dragged: { i, from: [x, y], base: the shape before, started }
   let doc = { annots: [], crop: null };
   const undoStack = [], redoStack = [];
   let draft = null, pan = null, typing = null;
@@ -250,8 +255,24 @@
     vctx.clip();
     vctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (ox - a.x * z), dpr * (oy - a.y * z));
     const seen = { x: sx, y: sy, w: sw, h: sh };
-    for (const an of doc.annots) if (meets(bbox(an), seen)) drawShape(vctx, an);
+    doc.annots.forEach((an, i) => {
+      if (typing && typing.edit === i) return;               // being edited in the text box
+      if (meets(bbox(an), seen)) drawShape(vctx, an);
+    });
     if (draft && draft.type !== "crop") drawShape(vctx, draft, true);
+    if (selected >= 0 && doc.annots[selected] && !(typing && typing.edit === selected)) {
+      const b = bbox(doc.annots[selected]), pad = 3 / z;
+      vctx.lineWidth = 1.5 / z;
+      vctx.strokeStyle = ACCENT;
+      vctx.setLineDash([5 / z, 4 / z]);
+      vctx.strokeRect(b.x - pad, b.y - pad, b.w + 2 * pad, b.h + 2 * pad);
+      vctx.setLineDash([]);
+      vctx.fillStyle = ACCENT;
+      const k = 6 / z;
+      for (const [cx, cy] of [[b.x - pad, b.y - pad], [b.x + b.w + pad, b.y - pad], [b.x - pad, b.y + b.h + pad], [b.x + b.w + pad, b.y + b.h + pad]]) {
+        vctx.fillRect(cx - k / 2, cy - k / 2, k, k);
+      }
+    }
     vctx.restore();
     if (draft && draft.type === "crop") drawCropSelection(ox, oy, a, dpr);
     placeFloaters();
@@ -356,6 +377,11 @@
       ctx.lineWidth = an.lw * 0.6;
       ctx.fill();
       ctx.stroke();
+    } else if (an.type === "ellipse") {
+      const r = norm(an);
+      ctx.beginPath();
+      ctx.ellipse(r.x + r.w / 2, r.y + r.h / 2, Math.max(0.5, r.w / 2), Math.max(0.5, r.h / 2), 0, 0, Math.PI * 2);
+      ctx.stroke();
     } else if (an.type === "box") {
       const r = norm(an);
       ctx.beginPath();
@@ -412,6 +438,7 @@
   }
   function afterHistory(cropBefore) {
     draft = null;
+    if (selected >= doc.annots.length) selected = -1;
     $("cropBar").hidden = true;
     refreshButtons();
     if (doc.crop !== cropBefore) fit(); else paint();
@@ -440,23 +467,110 @@
   function setTool(t) {
     if (typing) commitText();
     if (tool === "crop" && t !== "crop") { draft = null; $("cropBar").hidden = true; }
+    if (t !== "select") selected = -1;
     tool = t;
     document.querySelectorAll("[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === t)));
-    stage.style.cursor = t === "hand" ? "grab" : t === "text" ? "text" : "crosshair";
+    stage.style.cursor = t === "select" ? "grab" : t === "text" ? "text" : "crosshair";
     paint();
   }
+
+  // Which shape is under the point (the top one)? Lines count when the pointer is near them, closed shapes
+  // when it's inside or on the edge.
+  function hit(p) {
+    const tol = 7 / z;
+    const nearSeg = (x1, y1, x2, y2, d) => {
+      const dx = x2 - x1, dy = y2 - y1, len = dx * dx + dy * dy;
+      const t = len ? clamp(((p.x - x1) * dx + (p.y - y1) * dy) / len, 0, 1) : 0;
+      return Math.hypot(p.x - (x1 + t * dx), p.y - (y1 + t * dy)) <= d;
+    };
+    for (let i = doc.annots.length - 1; i >= 0; i--) {
+      const an = doc.annots[i], d = tol + (an.lw || 0) / 2;
+      if (an.type === "pen" || an.type === "marker") {
+        const pts = an.pts;
+        if (pts.length === 1 && Math.hypot(p.x - pts[0][0], p.y - pts[0][1]) <= d) return i;
+        for (let k = 1; k < pts.length; k++) if (nearSeg(pts[k - 1][0], pts[k - 1][1], pts[k][0], pts[k][1], d)) return i;
+      } else if (an.type === "arrow") {
+        if (nearSeg(an.ax, an.ay, an.bx, an.by, d + an.lw * 2)) return i;
+      } else if (an.type === "text") {
+        if (p.x >= an.x - tol && p.x <= an.x + an.tw + tol && p.y >= an.y - tol && p.y <= an.y + an.th + tol) return i;
+      } else if (an.type === "ellipse") {
+        const r = norm(an), rx = r.w / 2 + d, ry = r.h / 2 + d;
+        if (((p.x - r.x - r.w / 2) / rx) ** 2 + ((p.y - r.y - r.h / 2) / ry) ** 2 <= 1) return i;
+      } else {
+        const r = norm(an);
+        if (p.x >= r.x - d && p.x <= r.x + r.w + d && p.y >= r.y - d && p.y <= r.y + r.h + d) return i;
+      }
+    }
+    return -1;
+  }
+  function moved(an, dx, dy) {                    // a copy of the shape, shifted
+    const c = { ...an };
+    if (an.pts) c.pts = an.pts.map(([x, y]) => [x + dx, y + dy]);
+    if ("ax" in an) Object.assign(c, { ax: an.ax + dx, ay: an.ay + dy, bx: an.bx + dx, by: an.by + dy });
+    if (an.type === "text") Object.assign(c, { x: an.x + dx, y: an.y + dy });
+    if (an.type === "blur") Object.assign(c, { ax: Math.round(c.ax), ay: Math.round(c.ay), bx: Math.round(c.bx), by: Math.round(c.by) });
+    return c;
+  }
+  function restyleSelected(changes) {             // colour / size picked while a shape is selected
+    if (selected < 0 || !doc.annots[selected]) return;
+    const an = doc.annots[selected];
+    if (an.type === "blur") return;
+    change(() => {
+      doc.annots = doc.annots.slice();
+      const c = { ...an, ...changes(an) };
+      if (c.type === "text") remeasure(c);
+      doc.annots[selected] = c;
+    });
+    paint();
+  }
+  function remeasure(t) {
+    vctx.save();
+    vctx.font = `600 ${t.fs}px "Segoe UI", system-ui, sans-serif`;
+    t.tw = Math.max(...t.text.split("\n").map((l) => vctx.measureText(l).width));
+    t.th = t.text.split("\n").length * t.fs * 1.25;
+    vctx.restore();
+  }
+  function deleteSelected() {
+    if (selected < 0) return;
+    const i = selected;
+    selected = -1;
+    change(() => { doc.annots = doc.annots.filter((_a, k) => k !== i); });
+    paint();
+  }
+
+  stage.addEventListener("dblclick", (e) => {
+    if (!base || tool !== "select") return;
+    const i = hit(toImage(e));
+    if (i >= 0 && doc.annots[i].type === "text") { e.preventDefault(); openText(null, i); }
+  });
 
   stage.addEventListener("pointerdown", (e) => {
     if (!base || e.button !== 0) return;
     if (typing) { commitText(); return; }
-    if (tool === "hand") {
-      pan = { x: e.clientX, y: e.clientY, sl: stage.scrollLeft, st: stage.scrollTop };
-      stage.setPointerCapture(e.pointerId);
-      stage.style.cursor = "grabbing";
+    if (tool === "select") {
+      const p = toImage(e);
+      const i = hit(p);
+      selected = i;
+      if (i >= 0) {
+        moving = { i, from: [p.x, p.y], base: doc.annots[i], started: false };
+        stage.setPointerCapture(e.pointerId);
+        stage.style.cursor = "move";
+      } else {
+        pan = { x: e.clientX, y: e.clientY, sl: stage.scrollLeft, st: stage.scrollTop };
+        stage.setPointerCapture(e.pointerId);
+        stage.style.cursor = "grabbing";
+      }
+      paint();
       return;
     }
     const p = inside(toImage(e));
-    if (tool === "text") { e.preventDefault(); openText(p); return; }
+    if (tool === "text") {
+      e.preventDefault();
+      const i = hit(toImage(e));
+      if (i >= 0 && doc.annots[i].type === "text") openText(null, i);   // click on a text: edit it
+      else openText(p);
+      return;
+    }
     e.preventDefault();
     stage.setPointerCapture(e.pointerId);
     const lw = size / z;
@@ -471,6 +585,22 @@
       stage.scrollTop = pan.st - (e.clientY - pan.y);
       return;
     }
+    if (moving) {
+      const p = toImage(e);
+      const dx = p.x - moving.from[0], dy = p.y - moving.from[1];
+      if (!moving.started) {
+        if (Math.hypot(dx, dy) * z < 3) return;
+        moving.started = true;
+        change(() => { doc.annots = doc.annots.slice(); });   // one undo step for the whole drag
+      }
+      doc.annots[moving.i] = moved(moving.base, dx, dy);
+      paint();
+      return;
+    }
+    if (tool === "select" && !e.buttons && base) {           // hovering: show what can be moved
+      stage.style.cursor = hit(toImage(e)) >= 0 ? "move" : "grab";
+      return;
+    }
     if (!draft || !stage.hasPointerCapture(e.pointerId)) return;
     const p = inside(toImage(e));
     if (draft.pts) {
@@ -481,6 +611,10 @@
       const len = Math.hypot(p.x - draft.ax, p.y - draft.ay);
       draft.bx = draft.ax + Math.cos(ang) * len;
       draft.by = draft.ay + Math.sin(ang) * len;
+    } else if ((draft.type === "box" || draft.type === "ellipse") && e.shiftKey) {   // Shift: square / circle
+      const side = Math.max(Math.abs(p.x - draft.ax), Math.abs(p.y - draft.ay));
+      draft.bx = draft.ax + Math.sign(p.x - draft.ax || 1) * side;
+      draft.by = draft.ay + Math.sign(p.y - draft.ay || 1) * side;
     } else {
       draft.bx = p.x;
       draft.by = p.y;
@@ -490,7 +624,13 @@
   const pointerEnd = (e) => {
     if (pan) {
       pan = null;
-      stage.style.cursor = tool === "hand" ? "grab" : stage.style.cursor;
+      stage.style.cursor = tool === "select" ? "grab" : stage.style.cursor;
+      return;
+    }
+    if (moving) {
+      moving = null;
+      stage.style.cursor = "move";
+      paint();
       return;
     }
     if (!draft || !stage.hasPointerCapture(e.pointerId)) return;
@@ -527,7 +667,7 @@
     draft = null;
     $("cropBar").hidden = true;
     if (crop.w >= 2 && crop.h >= 2) change(() => { doc.crop = crop; });
-    setTool("hand");
+    setTool("select");
     fit();
   }
   function cancelCrop() {
@@ -554,15 +694,21 @@
   }
 
   // text: type straight onto the picture; Enter keeps it, Shift+Enter starts a new line, Esc drops it
-  function openText(p) {
+  function openText(p, edit) {
     const box = $("textBox");
-    const px = TEXT_PX[size] || 24;
-    typing = { x: p.x, y: p.y, fs: px / z, color };
-    Object.assign(box.style, { fontSize: `${px}px`, color, width: "60px", height: `${px * 1.3}px` });
-    box.value = "";
+    if (edit !== undefined) {                     // change a text already on the picture
+      const an = doc.annots[edit];
+      typing = { x: an.x, y: an.y, fs: an.fs, color: an.color, edit };
+      selected = edit;
+    } else typing = { x: p.x, y: p.y, fs: (TEXT_PX[size] || 24) / z, color };
+    const px = typing.fs * z;
+    Object.assign(box.style, { fontSize: `${px}px`, color: typing.color, width: "60px", height: `${px * 1.3}px` });
+    box.value = edit !== undefined ? doc.annots[edit].text : "";
     box.hidden = false;
     placeFloaters();
-    setTimeout(() => box.focus(), 0);
+    fitTextBox();
+    paint();
+    setTimeout(() => { box.focus(); if (edit !== undefined) box.select(); }, 0);
   }
   function fitTextBox() {
     const box = $("textBox");
@@ -578,13 +724,25 @@
     const t = typing;
     typing = null;
     box.hidden = true;
-    if (text.trim()) {
-      vctx.save();
-      vctx.font = `600 ${t.fs}px "Segoe UI", system-ui, sans-serif`;
-      const tw = Math.max(...text.split("\n").map((l) => vctx.measureText(l).width));
-      vctx.restore();
-      change(() => doc.annots.push({ type: "text", color: t.color, x: t.x, y: t.y, fs: t.fs, text, tw,
-                                     th: text.split("\n").length * t.fs * 1.25 }));
+    if (t.edit !== undefined) {
+      const old = doc.annots[t.edit];
+      if (old && (text !== old.text || t.color !== old.color)) {
+        change(() => {
+          doc.annots = doc.annots.slice();
+          if (text.trim()) {
+            const c = { ...old, text, color: t.color };
+            remeasure(c);
+            doc.annots[t.edit] = c;
+          } else {
+            doc.annots.splice(t.edit, 1);             // emptied: the text goes
+            selected = -1;
+          }
+        });
+      }
+    } else if (text.trim()) {
+      const c = { type: "text", color: t.color, x: t.x, y: t.y, fs: t.fs, text };
+      remeasure(c);
+      change(() => doc.annots.push(c));
     }
     paint();
   }
@@ -761,6 +919,8 @@
       b.addEventListener("click", () => {
         size = px;
         sg.querySelectorAll(".size").forEach((x) => x.setAttribute("aria-pressed", String(x === b)));
+        restyleSelected((an) => (an.type === "text" ? { fs: (TEXT_PX[px] || 24) / z }
+          : { lw: an.type === "marker" ? (px / z) * 3.5 : px / z }));
       });
       sg.append(b);
     });
@@ -794,13 +954,14 @@
     });
     $("cropApply").addEventListener("click", applyCrop);
     $("cropCancel").addEventListener("click", cancelCrop);
-    setTool("hand");
+    setTool("select");
   }
   function pickColor(hex, button) {
     color = hex;
     document.querySelectorAll("#colors .swatch").forEach((b) => b.setAttribute("aria-pressed", String(b === button)));
     document.querySelector(".swatch.custom").classList.toggle("on", !button);
     if (typing) { typing.color = hex; $("textBox").style.color = hex; }
+    else if (base) restyleSelected(() => ({ color: hex }));
   }
   function markPdf() {
     document.querySelectorAll("#pdfMenu [data-pdf]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.pdf === pdfMode)));
@@ -825,9 +986,23 @@
     if (k === "escape") {
       if (!$("pdfMenu").hidden) $("pdfMenu").hidden = true;
       else if (draft) cancelCrop();
-      else setTool("hand");
+      else if (selected >= 0) { selected = -1; paint(); }
+      else setTool("select");
       return;
     }
+    if (selected >= 0 && (k === "delete" || k === "backspace")) { e.preventDefault(); deleteSelected(); return; }
+    if (selected >= 0 && k === "enter" && doc.annots[selected] && doc.annots[selected].type === "text") {
+      e.preventDefault(); openText(null, selected); return;
+    }
+    const arrows = { arrowleft: [-1, 0], arrowright: [1, 0], arrowup: [0, -1], arrowdown: [0, 1] }[k];
+    if (selected >= 0 && arrows) {                   // nudge: 1 screen pixel, 10 with Shift
+      e.preventDefault();
+      const step = (e.shiftKey ? 10 : 1) / z, an = doc.annots[selected];
+      change(() => { doc.annots = doc.annots.slice(); doc.annots[selected] = moved(an, arrows[0] * step, arrows[1] * step); });
+      paint();
+      return;
+    }
+    if (k === "h") { setTool("select"); return; }
     const t = TOOLS.find(([, , letter]) => letter.toLowerCase() === k);
     if (t) setTool(t[0]);
   });
@@ -862,7 +1037,7 @@
 
   // the test harness reads the state through this; nothing else uses it
   window.__ydmShot = { get state() { return { W, H, S, z, tool, doc, undo: undoStack.length, redo: redoStack.length,
-                                              mode: rec && rec.mode, layouts, joins, ready: !$("loading").hidden ? false : true }; },
+                                              mode: rec && rec.mode, layouts, joins, selected, ready: !$("loading").hidden ? false : true }; },
                        compose };
   start();
 })();

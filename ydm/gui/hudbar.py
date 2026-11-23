@@ -4,7 +4,12 @@ cells (Studio) — a sci-fi HUD gauge, described below.
 line (Simple)  — a thin rounded track that fills smoothly with the percentage.
 pill (Modern)  — a rounded pill with a soft gradient and, on the big version, stripes drifting
                  across while bytes arrive.
-Only the HUD gauge shows the individual connections; the other two stay calm.
+blocks (Terminal) — a text-mode meter: [█████▌░░░░], solid blocks, the last one filled in eighths
+                 like the ▏▎▍▌ characters, the rest in a dotted shade.
+wave (Ocean)   — liquid filling a rounded tube; its front edge is two drifting waves while bytes arrive.
+beads          — a string of beads, one per slice of the file, lit from the real segment map; a ring
+                 marks the bead each connection is writing.
+The HUD gauge and the beads show the individual connections; the others stay calm.
 
 The HUD gauge:
 
@@ -17,10 +22,11 @@ no glow; on the big version a light sweeps across while bytes arrive.
 """
 from __future__ import annotations
 
+import math
 import time
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt, QTimer
-from PySide6.QtGui import QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF
+from PySide6.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPolygonF
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ..engine import DownloadItem, Status
@@ -58,6 +64,12 @@ def draw_bar(p: QPainter, rect: QRectF, item: DownloadItem | None, *, big: bool 
         return _draw_line(p, rect, item, big, fraction, status)
     if theme.BAR == "pill":
         return _draw_pill(p, rect, item, big, fraction, status)
+    if theme.BAR == "blocks":
+        return _draw_blocks(p, rect, item, big, fraction, status)
+    if theme.BAR == "wave":
+        return _draw_wave(p, rect, item, big, fraction, status)
+    if theme.BAR == "beads":
+        return _draw_beads(p, rect, item, big, fraction, status)
     return draw_hud_bar(p, rect, item, cell=7 if big else 5, gap=2.5 if big else 2.0, sweep=sweep,
                         fraction=fraction, status=status)
 
@@ -117,6 +129,137 @@ def _draw_pill(p: QPainter, rect: QRectF, item, big: bool, fraction, status) -> 
             p.drawLine(QPointF(x, track.bottom() + 1), QPointF(x + h, track.top() - 1))
             x += step
         p.restore()
+    p.restore()
+    return color
+
+
+def _draw_blocks(p: QPainter, rect: QRectF, item, big: bool, fraction, status) -> QColor:
+    _st, frac, color, live, unknown = _state(item, fraction, status)
+    h = min(rect.height(), 16.0 if big else 12.0)
+    top = rect.center().y() - h / 2
+    cw, gap, arm = (8.0, 1.0, 4.0) if big else (6.0, 1.0, 3.0)
+    p.save()
+    # the brackets, like "[" and "]"
+    frame = QColor(color if live else theme.MUTED)
+    p.setPen(QPen(frame, 1.4 if big else 1.2))
+    l, r = rect.left() + 1, rect.right() - 1
+    for x, d in ((l, 1), (r, -1)):
+        p.drawLine(QPointF(x, top), QPointF(x, top + h))
+        p.drawLine(QPointF(x, top), QPointF(x + d * arm, top))
+        p.drawLine(QPointF(x, top + h), QPointF(x + d * arm, top + h))
+    p.setPen(Qt.NoPen)
+    inner_l, inner_r = l + arm + 2, r - arm - 2
+    n = max(1, int((inner_r - inner_l + gap) // (cw + gap)))
+    x0 = inner_l + ((inner_r - inner_l) - (n * (cw + gap) - gap)) / 2
+    filled = max(0.0, min(1.0, frac)) * n
+    shade = QBrush(QColor(theme.FAINT), Qt.Dense5Pattern)        # "░"
+    scan = None
+    if unknown:                                                  # size unknown: three blocks bounce along
+        t = (time.monotonic() * 1.2) % 2
+        scan = (t if t <= 1 else 2 - t) * (n - 3)
+    for i in range(n):
+        x = x0 + i * (cw + gap)
+        if scan is not None:
+            if scan <= i < scan + 3:
+                p.fillRect(QRectF(x, top + 2, cw, h - 4), color)
+            else:
+                p.fillRect(QRectF(x, top + 2, cw, h - 4), shade)
+            continue
+        if i < int(filled):
+            p.fillRect(QRectF(x, top + 2, cw, h - 4), color)
+        else:
+            p.fillRect(QRectF(x, top + 2, cw, h - 4), shade)
+            if i == int(filled) and filled - i > 0:              # the last block in eighths: ▏▎▍▌▋▊▉
+                part = math.ceil((filled - i) * 8) / 8
+                p.fillRect(QRectF(x, top + 2, cw * part, h - 4), color)
+    p.restore()
+    return color
+
+
+def _draw_wave(p: QPainter, rect: QRectF, item, big: bool, fraction, status) -> QColor:
+    st, frac, color, live, unknown = _state(item, fraction, status)
+    h = min(rect.height(), 18.0 if big else 13.0)
+    track = QRectF(rect.left(), rect.center().y() - h / 2, rect.width(), h)
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+    p.setPen(Qt.NoPen)
+    clip = QPainterPath()
+    clip.addRoundedRect(track, h / 2, h / 2)
+    p.fillPath(clip, QColor(theme.UNLIT))
+    p.setClipPath(clip)
+    moving = live and st == Status.DOWNLOADING
+    phase = time.monotonic() * 3.2 if moving or unknown else 0.0
+    amp = h * (0.2 if big else 0.16)
+    if unknown:
+        front = track.left() + track.width() * (0.35 + 0.25 * math.sin(time.monotonic() * 1.3))
+    else:
+        front = track.left() + track.width() * max(0.0, min(1.0, frac))
+
+    def liquid(shift: float, ph: float) -> QPainterPath:
+        path = QPainterPath(QPointF(track.left() - 2, track.top() - 1))
+        steps = 12
+        for k in range(steps + 1):                         # the front edge: a wave standing on its side
+            y = track.top() - 1 + (h + 2) * k / steps
+            x = front + shift + amp * math.sin(ph + k / steps * 2 * math.pi)
+            path.lineTo(QPointF(x, y))
+        path.lineTo(QPointF(track.left() - 2, track.bottom() + 1))
+        path.closeSubpath()
+        return path
+
+    if frac > 0 or unknown:
+        if st == Status.COMPLETED:
+            p.fillPath(clip, color)
+        else:
+            back = QColor(color)
+            back.setAlphaF(0.4)
+            p.fillPath(liquid(amp * 0.9, phase + 1.9), back)       # the wave behind, a little ahead
+            grad = QLinearGradient(0, track.top(), 0, track.bottom())
+            grad.setColorAt(0.0, QColor(color).lighter(118))
+            grad.setColorAt(1.0, QColor(color).darker(108))
+            p.fillPath(liquid(0.0, phase), grad)
+    p.restore()
+    return color
+
+
+def _draw_beads(p: QPainter, rect: QRectF, item, big: bool, fraction, status) -> QColor:
+    st, frac, color, live, unknown = _state(item, fraction, status)
+    d = min(rect.height() - 2, 11.0 if big else 8.0)
+    gap = 3.0 if big else 2.5
+    n = max(1, int((rect.width() + gap) // (d + gap)))
+    x0 = rect.left() + (rect.width() - (n * (d + gap) - gap)) / 2
+    cy = rect.center().y()
+    if item is not None:
+        cov = coverage(item, n)
+        hot = heads(item, n)
+    else:
+        filled = frac * n
+        cov = [max(0.0, min(1.0, filled - i)) for i in range(n)]
+        hot = set()
+    p.save()
+    p.setRenderHint(QPainter.Antialiasing)
+    scan = None
+    if unknown:
+        t = (time.monotonic() * 1.3) % 2
+        scan = (t if t <= 1 else 2 - t) * (n - 1)
+    for i in range(n):
+        c = QPointF(x0 + i * (d + gap) + d / 2, cy)
+        if scan is not None:
+            near = max(0.0, 1 - abs(i - scan) / 3)
+            bead = QColor(color) if near > 0 else QColor(theme.UNLIT)
+            if near > 0:
+                bead.setAlphaF(0.25 + 0.75 * near)
+        elif cov[i] <= 0.001:
+            bead = QColor(theme.UNLIT)
+        else:
+            bead = QColor(color)
+            bead.setAlphaF(1.0 if st == Status.COMPLETED else 0.3 + 0.7 * cov[i])
+        p.setPen(Qt.NoPen)
+        p.setBrush(bead)
+        p.drawEllipse(c, d / 2, d / 2)
+        if i in hot and live:                                    # a connection writing here
+            p.setBrush(Qt.NoBrush)
+            p.setPen(QPen(QColor(theme._mix(color.name(), "#FFFFFF", 0.55)), 1.6 if big else 1.3))
+            p.drawEllipse(c, d / 2 + 1.6, d / 2 + 1.6)
     p.restore()
     return color
 

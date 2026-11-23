@@ -125,6 +125,7 @@ chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove(key(t
 // ---- right-click menus -----------------------------------------------------
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({ id: "ydm-text", title: "Copy with YDM", contexts: ["selection"] });
     chrome.contextMenus.create({ id: "ydm-link", title: "Download with YDM",
       contexts: ["link", "image", "video", "audio"] });
     chrome.contextMenus.create({ id: "ydm-video", title: "Download the video on this page with YDM",
@@ -147,6 +148,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   let ok;
   if (String(info.menuItemId).startsWith("ydm-shot-")) {
     screenshot(tab, String(info.menuItemId).slice(9));
+    return;
+  }
+  if (info.menuItemId === "ydm-text") {
+    copyWithYdm(tab, info.frameId, info.selectionText);
     return;
   }
   if (info.menuItemId === "ydm-link") {
@@ -237,6 +242,11 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     getSettings().then((s) => ping(s.port)).then(reply);
     return true;
   }
+  if (msg.type === "text-new") {                // the popup's "Text editor": an empty page
+    chrome.tabs.create({ url: chrome.runtime.getURL("text.html") });
+    reply(true);
+    return;
+  }
   if (msg.type === "shot") {                    // from the popup (it closes itself right after)
     chrome.tabs.get(msg.tabId).then((tab) => screenshot(tab, msg.mode), () => {});
     reply(true);
@@ -255,10 +265,36 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const toPage = (tabId, msg) => chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
 
 chrome.commands?.onCommand.addListener(async (command, tab) => {
-  if (!command.startsWith("shot-")) return;
   tab = tab || (await chrome.tabs.query({ active: true, currentWindow: true }))[0];
-  screenshot(tab, command.slice(5));
+  if (command === "text-copy") copyWithYdm(tab, null, "");
+  else if (command.startsWith("shot-")) screenshot(tab, command.slice(5));
 });
+
+// ---- "Copy with YDM": the selected text into the text editor (text.html) --------------------------------
+// The page's own selection keeps its line breaks (the menu's selectionText squashes them into spaces), and a
+// selection inside a text box is read from the box. Protected pages fall back to the menu's copy.
+async function copyWithYdm(tab, frameId, fallback) {
+  if (!tab) return;
+  let text = fallback || "";
+  try {
+    const target = frameId === null || frameId === undefined ? { tabId: tab.id, allFrames: true } : { tabId: tab.id, frameIds: [frameId] };
+    const results = await chrome.scripting.executeScript({ target, func: () => {
+      const el = document.activeElement;
+      if (el && (el.tagName === "TEXTAREA" || (el.tagName === "INPUT" && /^(text|search|url|email|tel)$/i.test(el.type))) &&
+          el.selectionStart !== el.selectionEnd) return el.value.slice(el.selectionStart, el.selectionEnd);
+      return String(getSelection() || "");
+    } });
+    const found = results.map((r) => r.result).find((r) => typeof r === "string" && r.trim());
+    if (found) text = found;
+  } catch { /* a page extensions can't read: keep the menu's copy */ }
+  const rec = { id: Date.now().toString(36) + Math.random().toString(36).slice(2, 6), created: Date.now(), updated: Date.now(),
+                title: tab.title || "", url: tab.url || "", text, lang: "auto" };
+  try {
+    await TextDB.put(rec);
+    await TextDB.prune();
+  } catch { /* the editor opens empty if this fails */ }
+  chrome.tabs.create({ url: chrome.runtime.getURL(`text.html#${rec.id}`), index: tab.index + 1, openerTabId: tab.id });
+}
 
 async function pageReady(tabId) {
   try { if (await toPage(tabId, { type: "shot-ping" })) return true; } catch { /* not there yet */ }

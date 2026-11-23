@@ -196,7 +196,7 @@ sd.reject(); assert theme.ACCENT == s.accent.upper(), "Cancel didn't restore the
 sd = SettingsDialog(s, w, 6); sd.show(); pump(0.1)
 sd.theme_preview.connect(w.apply_theme)
 designs = {b.property("design"): b for b in sd.design_group.buttons()}
-assert set(designs) == {"studio", "simple", "modern"}
+assert set(designs) == {"studio", "simple", "modern", "terminal", "ocean"}
 designs["modern"].click(); pump(0.2)
 assert (theme.DESIGN, theme.BAR, theme.ICONS, theme.RADIUS) == ("modern", "pill", "duotone", 10), theme.DESIGN
 assert w.table.verticalHeader().defaultSectionSize() == theme.ROW == 40 and theme.BG == theme.DESIGNS["modern"]["grounds"]["dark"]["BG"]
@@ -210,6 +210,14 @@ assert (theme.DESIGN, theme.BAR, theme.ICONS) == ("simple", "line", "thin"), (th
 assert sd.bar_style.currentIndex() == 0 and sd.icon_style.currentIndex() == 0, "a new design brings its own bar and icons"
 assert sd.bar_style.itemText(0) == "As the design (Thin line)"
 w.grab().save(f"{out}/design-simple.png")
+designs["terminal"].click(); pump(0.2)
+assert (theme.DESIGN, theme.BAR, theme.RADIUS) == ("terminal", "blocks", 0) and "border-radius: 0px" in app.styleSheet()
+assert theme.FONT_FAMILY in ("Cascadia Mono", "Consolas", "Segoe UI")
+w.grab().save(f"{out}/design-terminal.png")
+designs["ocean"].click(); pump(0.2)
+assert (theme.DESIGN, theme.BAR, theme.ICONS) == ("ocean", "wave", "duotone") and theme.BG == theme.DESIGNS["ocean"]["grounds"]["dark"]["BG"]
+sd.bar_style.setCurrentIndex(sd.bar_style.findData("beads")); pump(0.1); assert theme.BAR == "beads"
+designs["simple"].click(); pump(0.2)
 look = sd._look()
 assert look[4:] == ("simple", "", "") and theme.ROW == 30
 sd.reject(); pump(0.1)
@@ -219,7 +227,7 @@ from ydm.gui import hudbar
 from PySide6.QtGui import QImage, QPainter as _QP
 from PySide6.QtCore import QRectF
 img = QImage(400, 40, QImage.Format_ARGB32)
-for bar in ("cells", "line", "pill"):
+for bar in theme.BAR_STYLES:
     theme.BAR = bar
     for it in m.items():
         for big in (False, True):
