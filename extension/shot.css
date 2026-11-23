@@ -72,6 +72,14 @@ button { font: inherit; color: inherit; }
 .size:hover { background: var(--raised); border-color: var(--line); }
 .size[aria-pressed="true"] { border-color: var(--accent); background: #2B2721; }
 .size i { display: block; border-radius: 50%; background: var(--text); }
+#font { height: 32px; max-width: 150px; padding: 0 6px; border-radius: 6px; border: 1px solid var(--line); background: var(--raised);
+        color: var(--text); cursor: pointer; }
+#font:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.mini { width: 32px; height: 32px; border-radius: 6px; border: 1px solid transparent; background: none; cursor: pointer;
+        display: grid; place-items: center; font: 15px Georgia, serif; }
+.mini:hover { background: var(--raised); border-color: var(--line); }
+.mini[aria-pressed="true"] { border-color: var(--accent); background: #2B2721; color: var(--accent); }
+.mini svg { width: 16px; height: 16px; }
 
 .note { padding: 8px 16px; background: #1E2226; border-bottom: 1px solid var(--line); color: var(--muted); font-size: 12.5px; }
 .note b { color: var(--accent); font-weight: 600; }

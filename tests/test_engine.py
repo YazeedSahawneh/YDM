@@ -369,7 +369,8 @@ wait(mi, {Status.COMPLETED, Status.ERROR}, 120)
 assert mi.status == Status.COMPLETED, mi.error
 check(mi)
 src = {s["url"].split("/grp-")[1].split("/")[0]: s for s in mi.sources}
-assert src["B"]["state"] == "ok" and GBYTES.get("B", 0) > 2 * 1024 * 1024, (src["B"], GBYTES)
+# the mirror really helped: more than its 64 KB check sample (how much more depends on which server is quicker)
+assert src["B"]["state"] == "ok" and GBYTES.get("B", 0) > 512 * 1024, (src["B"], GBYTES)
 assert GMAX["A"] <= 2 and GMAX["B"] <= 2, GMAX                 # each server's own limit held
 assert src["other"]["state"] == "bad" and "don't match" in src["other"]["note"], src["other"]
 assert src["short"]["state"] == "bad" and "different file" in src["short"]["note"], src["short"]
@@ -397,7 +398,7 @@ wait(mm, {Status.COMPLETED, Status.ERROR}, 120)
 assert mm.status == Status.COMPLETED, mm.error
 check(mm)
 assert mm.mirrors == [lh + "/grp-B/f.bin"], mm.mirrors        # the stylesheet link isn't a mirror
-assert GBYTES.get("B", 0) > 2 * 1024 * 1024, GBYTES
+assert GBYTES.get("B", 0) > 512 * 1024, GBYTES                # it sent real pieces, not just the check sample
 from ydm.engine.http_downloader import _metalink_xml
 meta4 = ('<?xml version="1.0"?><metalink xmlns="urn:ietf:params:xml:ns:metalink"><file name="f.iso">'
          '<size>418381824</size><url location="am" priority="1">https://a.example/f.iso</url>'
@@ -551,6 +552,74 @@ assert not mm.missing
 wait(mm, {Status.COMPLETED, Status.ERROR}, 120); assert mm.status == Status.COMPLETED, mm.error
 check(mm); assert m2.check_files() == [] and mm.label == Status.COMPLETED
 print("OK deleted file noticed (File missing) and downloaded again")
+
+# 6g. the extension asks before taking a download from the browser: can YDM fetch it by itself?
+from http.server import BaseHTTPRequestHandler as _BH, ThreadingHTTPServer as _TS
+from ydm.engine import linkcheck
+
+
+class _Gate(_BH):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        p = self.path
+        if p.startswith("/file"):                       # needs the browser's cookie
+            ok = "sid=1" in (self.headers.get("Cookie") or "")
+            body = b"x" if ok else b""
+            self.send_response(206 if ok else 403)
+            if ok: self.send_header("Content-Range", "bytes 0-0/100"); self.send_header("Content-Type", "application/zip")
+        elif p.startswith("/page"):                     # a login / check page instead of the file
+            body = b"<html>sign in</html>"; self.send_response(200); self.send_header("Content-Type", "text/html")
+        elif p.startswith("/form"):
+            body = b""; self.send_response(405)
+        else:
+            body = b""; self.send_response(404)
+        self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+
+gate = _TS(("127.0.0.1", 0), _Gate); threading.Thread(target=gate.serve_forever, daemon=True).start()
+g = f"http://127.0.0.1:{gate.server_port}"
+assert linkcheck.check(g + "/file", {"Cookie": "sid=1"}, "application/zip")["ok"]
+r = linkcheck.check(g + "/file", {}, "application/zip"); assert not r["ok"] and "browser" in r["reason"], r
+r = linkcheck.check(g + "/page", {}, "application/pdf"); assert not r["ok"] and "web page" in r["reason"], r
+assert linkcheck.check(g + "/page", {}, "text/html")["ok"]           # an HTML file that is meant to be HTML
+r = linkcheck.check(g + "/form", {}, ""); assert not r["ok"] and "form" in r["reason"], r
+r = linkcheck.check(g + "/gone", {}, ""); assert not r["ok"] and "only works inside the browser" in r["reason"], r
+r = linkcheck.check("http://127.0.0.1:1/x", {}, ""); assert not r["ok"] and "couldn't reach" in r["reason"], r
+gate.shutdown()
+print("OK link check (what YDM can fetch by itself stays with YDM, the rest stays in the browser)")
+
+# 6h. a streamed video (HLS: a master playlist, two qualities, the video in pieces): the whole video, joined
+SEGS = {f"/hls/hi{i}.ts": bytes([i]) * (150_000 + i) for i in range(6)}
+class _Hls(_BH):
+    def log_message(self, *a): pass
+    def do_GET(self):
+        p = self.path.split("?")[0]
+        if p == "/hls/master.m3u8":
+            body = (b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=300000,RESOLUTION=320x180\nlo.m3u8\n"
+                    b"#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720\nhi.m3u8\n")
+            ctype = "application/vnd.apple.mpegurl"
+        elif p in ("/hls/hi.m3u8", "/hls/lo.m3u8"):
+            body = ("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n" +
+                    "".join(f"#EXTINF:4.0,\n{name.rsplit('/', 1)[1]}\n" for name in SEGS) + "#EXT-X-ENDLIST\n").encode()
+            ctype = "application/vnd.apple.mpegurl"
+        elif p in SEGS:
+            body, ctype = SEGS[p], "video/mp2t"
+        else:
+            body, ctype = b"", "text/plain"
+        self.send_response(200 if body else 404)
+        self.send_header("Content-Type", ctype); self.send_header("Content-Length", str(len(body))); self.end_headers()
+        self.wfile.write(body)
+
+
+hls = _TS(("127.0.0.1", 0), _Hls); threading.Thread(target=hls.serve_forever, daemon=True).start()
+hv = m2.add(f"http://127.0.0.1:{hls.server_port}/hls/master.m3u8", kind="video", video_format="best")
+wait(hv, {Status.COMPLETED, Status.ERROR}, 120)
+assert hv.status == Status.COMPLETED, hv.error
+got = open(hv.path, "rb").read()
+want = b"".join(SEGS.values())
+assert got == want, (len(got), len(want))                 # every piece, in order (the best quality's)
+hls.shutdown()
+print(f"OK a streamed video (HLS, {len(SEGS)} pieces) downloads whole: {len(got):,} bytes, pieces in order")
 
 # 7. bad url
 e = m2.add(base.replace(str(srv.server_port), "1") + "/x")

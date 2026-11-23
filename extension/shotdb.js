@@ -31,6 +31,7 @@ function ydmStore(name, store, keep) {
   return {
     put: (rec) => run("readwrite", (s) => s.put(rec)),
     get: (id) => run("readonly", (s) => s.get(id)),
+    all: () => run("readonly", (s) => s.getAll()).then((r) => (r || []).sort((a, b) => (b.updated || b.created) - (a.updated || a.created))),
     remove: (id) => run("readwrite", (s) => s.delete(id)),
     async prune() {                                   // the newest few stay
       const all = (await run("readonly", (s) => s.getAll())) || [];

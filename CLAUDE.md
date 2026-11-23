@@ -21,7 +21,8 @@ The tests are plain scripts, not pytest. Each one prints `ALL GOOD` / `GUI OK` o
 main.py                         single-instance check (pings the port), starts Qt + LocalServer
 ydm/config.py                   APP_NAME, ACCENT, CATEGORIES, Settings dataclass (%APPDATA%\YDM\settings.json)
 ydm/server.py                   127.0.0.1:9614 — GET /ping, POST /add (extension → app; kind file|video|batch),
-                                POST /info (quality list for the extension's on-page menu)
+                                POST /info (quality list for the extension's on-page menu), POST /probe (can YDM fetch it?)
+ydm/engine/linkcheck.py         check(url, headers, mime): a 1-byte GET to see if YDM can fetch a link without the browser
 ydm/tools.py                    FFmpeg/Deno install into %APPDATA%\YDM	ools, yt-dlp zip override (hot update)
 ydm/updater.py                  GitHub Releases (UPDATE_REPO) check → download setup → silent install /RELAUNCH
 ydm/engine/item.py              DownloadItem / Segment dataclasses (persisted to downloads.json)
@@ -46,7 +47,8 @@ ydm/gui/                        main_window, dialogs (Batch, Settings, Login, Re
 extension/                      MV3: background.js (catch downloads, media sniffer, menus, screenshot capture), content.js
                                 (video/photo button, page side of screenshots), popup, shot.html/js/css (screenshot editor),
                                 shotdb.js (IndexedDB: ShotDB captures, TextDB texts), pdf.js (tiny JPEG-per-page PDF writer),
-                                text.html/js/css (text editor: Copy with YDM), textkit.js (its tools), yaml.js (YAML reader/writer)
+                                text.html/js/css (text editor: Copy with YDM), textkit.js (its tools), yaml.js (YAML reader/writer),
+                                markdown.js (safe Markdown → HTML for the preview)
 ```
 
 ### How a download works
@@ -100,6 +102,12 @@ Popup / Alt+Shift+Y / right-click → `background.screenshot(tab, mode)`. Full p
 
 ### Text editor (extension)
 "Copy with YDM" (context menu on a selection, command `text-copy`, popup "Text editor") → `background.copyWithYdm()` reads the selection with `scripting.executeScript` in the clicked frame (`info.selectionText` squashes line breaks; text boxes are read from their own selection; password fields never), stores `{id, text, title, url}` in TextDB and opens `text.html#<id>`. `text.js`: a transparent textarea over a coloured `<pre>` (same font/padding; the pre is kept off the textarea's scrollbars), line numbers in a `<pre>` gutter, all edits through `document.execCommand("insertText")` so the browser's undo covers the tools, autosave to TextDB. `textkit.js` is plain functions (`TOOLS`: `[group, id, label, fn, {insert|password}]`, `validate`, `detect`, `encrypt`/`decrypt` = AES-256-GCM with PBKDF2-SHA256 600k, `YDM-AES256:` + base64(salt|iv|data)) and `yaml.js` is YDM's own YAML 1.2 reader/writer (no outside code); both run under node, so test them there (the suites live outside the repo).
+
+### Catching downloads (extension)
+`downloads.onCreated` doesn't cancel the browser's download straight away: it asks the app `POST /probe` (→ `linkcheck.check`, a `Range: bytes=0-0` GET with the page's cookies, referrer and user agent). Only when YDM can fetch it is the browser's copy cancelled and erased (and not if it already finished). Otherwise the browser keeps it and `keptInBrowser` stores `{name, reason}` in `storage.session.kept` for the popup (badge "web"). An older app without /probe (404) counts as yes. Files the browser opens itself (`main_frame` responses with a video/audio type, or PDF) never become downloads: `webRequest` records them as `doc:<tabId>` for the popup's file card and sends them on when `catchPlayable` / `catchPdf` are on. The media sniffer folds range-piece URLs (`RANGE_KEYS`: bytestart/byteend, range=, …) into one whole-file entry sized from `Content-Range`, labels HLS playlists `master` / `quality` (it reads the m3u8) and DASH, and only counts segment requests (`FRAGMENT`) instead of listing them. Streams go to the app as `kind: "video"` (yt-dlp's generic extractor downloads every piece, `concurrent_fragment_downloads`, and joins them); the engine test covers an HLS master → whole video.
+
+### Text editor bar
+`text.js` builds the bar from `BUILTIN` (id → icon, label, tooltip, action) plus pinned tools `tool:<id>`; the order is the `bar` pref (localStorage `ydm-text-bar`, default `DEFAULT_BAR`). Built-in buttons keep their ids (`format`, `lock`, `wrap`, …), so code that touches them checks they exist (a user can take any off). Pins come from the palette (`.pin` on each row) or the Customize dialog (`#custom`). The side pane (`#pane`) shows the preview (`markdown.js`; HTML goes into an `<iframe sandbox="">` with no scripts) or a compare (`TextKit.lineDiff`, unchanged runs folded). `TextDB.all()` feeds *Recent*.
 
 ### Photos and posts
 `gallery.fetch_media_info()` runs yt-dlp and (for `SOCIAL` hosts, or when yt-dlp finds nothing) gallery-dl side by side; a post with photos gets an extra quality-list entry whose format is `gallery.OPTION` ("gallery"). Choosing it calls `MainWindow.save_post()` → `gallery.take()` (the cached listing; signed links expire) → `manager.add_gallery()`, one queued item per file (`ytdl:` entries become video items). gallery-dl is a separate program in `tools\` (GPL, so it's not bundled into the exe). Its GitHub releases carry no files any more: `tools._install_gallery_dl` takes the newest stable `gallery-dl.exe` from Codeberg's API, falls back to the official nightly build (gdl-org/builds), and keeps the first copy that runs `--version`; the dev venv's `gallery-dl.exe` is found too (`pip install gallery-dl`, test-only). The page's cookies go to gallery-dl as a temporary cookies.txt and are only forwarded to media URLs on the same site.

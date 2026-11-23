@@ -16,11 +16,18 @@ from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
 
 from ydm.config import APP_NAME, Settings  # noqa: E402
-from ydm.engine import DownloadManager, net  # noqa: E402
+from ydm.engine import DownloadManager, linkcheck, net  # noqa: E402
 from ydm.gui import hudbar, theme  # noqa: E402
 from ydm.gui.main_window import MainWindow  # noqa: E402
 from ydm.engine.video_downloader import browser_info  # noqa: E402
 from ydm.server import LocalServer  # noqa: E402
+
+
+def probe_link(payload: dict) -> dict:
+    """The extension asks: can YDM fetch this download by itself, with the browser's cookies?"""
+    headers = {"Referer": payload.get("referrer") or "", "User-Agent": payload.get("userAgent") or "",
+               "Cookie": payload.get("cookies") or ""}
+    return linkcheck.check(str(payload["url"]), headers, str(payload.get("mime") or ""))
 
 
 def send_to_running_instance(port: int, url: str | None) -> bool:
@@ -72,7 +79,8 @@ def main() -> int:
 
     server = None
     try:
-        server = LocalServer(settings.port, lambda payload: window.browser_request.emit(payload), browser_info)
+        server = LocalServer(settings.port, lambda payload: window.browser_request.emit(payload), browser_info,
+                             probe_link)
         server.start()
     except OSError:
         QMessageBox.warning(window, APP_NAME,

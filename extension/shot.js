@@ -44,6 +44,24 @@
   const COLORS = [["#FF4D4D", "Red"], ["#FFB547", "Amber"], ["#FFE14D", "Yellow"], ["#3DDBC0", "Teal"],
                   ["#4DA3FF", "Blue"], ["#FFFFFF", "White"], ["#111111", "Black"]];
   const SIZES = [[2, "Thin"], [4, "Medium"], [8, "Thick"]];
+  // fonts every Windows has, each with a fallback for other systems
+  const FONTS = {
+    "Segoe UI": '"Segoe UI", system-ui, sans-serif', "Arial": "Arial, Helvetica, sans-serif",
+    "Verdana": "Verdana, Geneva, sans-serif", "Tahoma": "Tahoma, Verdana, sans-serif",
+    "Trebuchet MS": '"Trebuchet MS", sans-serif', "Calibri": "Calibri, Carlito, sans-serif",
+    "Georgia": "Georgia, serif", "Times New Roman": '"Times New Roman", Times, serif',
+    "Palatino": '"Palatino Linotype", Palatino, serif', "Cambria": "Cambria, Caladea, serif",
+    "Impact": 'Impact, "Arial Black", sans-serif', "Arial Black": '"Arial Black", Arial, sans-serif',
+    "Consolas": 'Consolas, "Cascadia Mono", monospace', "Courier New": '"Courier New", Courier, monospace',
+    "Comic Sans MS": '"Comic Sans MS", "Comic Neue", cursive', "Segoe Print": '"Segoe Print", "Comic Sans MS", cursive',
+    "Segoe Script": '"Segoe Script", "Segoe Print", cursive', "Ink Free": '"Ink Free", "Segoe Print", cursive',
+  };
+  let textStyle = { font: "Segoe UI", bold: true, italic: false, label: false };
+  const fontOf = (t) => `${t.italic ? "italic " : ""}${t.bold === false ? 400 : 700} ${t.fs}px ${FONTS[t.font] || FONTS["Segoe UI"]}`;
+  const ink = (hex) => {                         // black or white, whichever reads on hex
+    const n = parseInt(hex.slice(1), 16);
+    return (0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255)) / 255 > 0.6 ? "#111111" : "#FFFFFF";
+  };
   const TEXT_PX = { 2: 16, 4: 24, 8: 38 };
 
   // ---- state -------------------------------------------------------------------------------------------
@@ -318,7 +336,10 @@
       return { x: Math.min(an.ax, an.bx) - m, y: Math.min(an.ay, an.by) - m,
                w: Math.abs(an.bx - an.ax) + 2 * m, h: Math.abs(an.by - an.ay) + 2 * m };
     }
-    if (an.type === "text") return { x: an.x - 4, y: an.y - 4, w: an.tw + 8, h: an.th + 8 };
+    if (an.type === "text") {
+      const pad = an.label ? an.fs * 0.3 : 4;
+      return { x: an.x - pad, y: an.y - pad, w: an.tw + pad * 2, h: an.th + pad * 2 };
+    }
     const r = norm(an);
     return { x: r.x - m, y: r.y - m, w: r.w + 2 * m, h: r.h + 2 * m };
   }
@@ -400,12 +421,21 @@
         ctx.drawImage(pixelated(an), r.x, r.y, r.w, r.h);
       }
     } else if (an.type === "text") {
-      ctx.font = `600 ${an.fs}px "Segoe UI", system-ui, sans-serif`;
+      ctx.font = fontOf(an);
       ctx.textBaseline = "top";
-      ctx.lineWidth = Math.max(1, an.fs / 7);
-      ctx.strokeStyle = halo(an.color);
+      if (an.label) {                            // a coloured tag behind the text, text in black or white
+        const pad = an.fs * 0.3;
+        ctx.beginPath();
+        if (ctx.roundRect) ctx.roundRect(an.x - pad, an.y - pad * 0.6, an.tw + pad * 2, an.th + pad * 1.2, pad * 0.8);
+        else ctx.rect(an.x - pad, an.y - pad * 0.6, an.tw + pad * 2, an.th + pad * 1.2);
+        ctx.fill();
+        ctx.fillStyle = ink(an.color);
+      } else {
+        ctx.lineWidth = Math.max(1, an.fs / 7);
+        ctx.strokeStyle = halo(an.color);
+      }
       an.text.split("\n").forEach((line, i) => {
-        ctx.strokeText(line, an.x, an.y + i * an.fs * 1.25);
+        if (!an.label) ctx.strokeText(line, an.x, an.y + i * an.fs * 1.25);
         ctx.fillText(line, an.x, an.y + i * an.fs * 1.25);
       });
     }
@@ -470,8 +500,21 @@
     if (t !== "select") selected = -1;
     tool = t;
     document.querySelectorAll("[data-tool]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.tool === t)));
-    stage.style.cursor = t === "select" ? "grab" : t === "text" ? "text" : "crosshair";
+    stage.style.cursor = cursorFor(t);
     paint();
+  }
+  function cursorFor(t) {
+    if (t === "select") return "grab";
+    const both = (d) => `<path d='${d}' fill='none' stroke='%23111' stroke-width='3.4' stroke-linecap='round'/>` +
+                        `<path d='${d}' fill='none' stroke='white' stroke-width='1.5' stroke-linecap='round'/>`;
+    let body;
+    if (t === "text") body = both("M9 4h6M12 4v16M9 20h6");
+    else {
+      body = both("M12 2.5v6.5M12 15v6.5M2.5 12h6.5M15 12h6.5") +
+        `<circle cx='12' cy='12' r='2.6' fill='${encodeURIComponent(color)}' stroke='%23111' stroke-width='1.2'/>`;
+    }
+    return `url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' width='24' height='24'>${body}</svg>") 12 12, ` +
+           (t === "text" ? "text" : "crosshair");
   }
 
   // Which shape is under the point (the top one)? Lines count when the pointer is near them, closed shapes
@@ -511,13 +554,15 @@
     if (an.type === "blur") Object.assign(c, { ax: Math.round(c.ax), ay: Math.round(c.ay), bx: Math.round(c.bx), by: Math.round(c.by) });
     return c;
   }
-  function restyleSelected(changes) {             // colour / size picked while a shape is selected
+  function restyleSelected(changes) {             // colour / size / font picked while a shape is selected
     if (selected < 0 || !doc.annots[selected]) return;
     const an = doc.annots[selected];
     if (an.type === "blur") return;
+    const delta = changes(an);
+    if (!delta) return;
     change(() => {
       doc.annots = doc.annots.slice();
-      const c = { ...an, ...changes(an) };
+      const c = { ...an, ...delta };
       if (c.type === "text") remeasure(c);
       doc.annots[selected] = c;
     });
@@ -525,7 +570,7 @@
   }
   function remeasure(t) {
     vctx.save();
-    vctx.font = `600 ${t.fs}px "Segoe UI", system-ui, sans-serif`;
+    vctx.font = fontOf(t);
     t.tw = Math.max(...t.text.split("\n").map((l) => vctx.measureText(l).width));
     t.th = t.text.split("\n").length * t.fs * 1.25;
     vctx.restore();
@@ -551,6 +596,7 @@
       const p = toImage(e);
       const i = hit(p);
       selected = i;
+      if (i >= 0 && doc.annots[i].type === "text") showTextStyle(doc.annots[i]);
       if (i >= 0) {
         moving = { i, from: [p.x, p.y], base: doc.annots[i], started: false };
         stage.setPointerCapture(e.pointerId);
@@ -624,7 +670,7 @@
   const pointerEnd = (e) => {
     if (pan) {
       pan = null;
-      stage.style.cursor = tool === "select" ? "grab" : stage.style.cursor;
+      stage.style.cursor = cursorFor(tool);
       return;
     }
     if (moving) {
@@ -698,17 +744,42 @@
     const box = $("textBox");
     if (edit !== undefined) {                     // change a text already on the picture
       const an = doc.annots[edit];
-      typing = { x: an.x, y: an.y, fs: an.fs, color: an.color, edit };
+      typing = { x: an.x, y: an.y, fs: an.fs, color: an.color, edit, font: an.font || "Segoe UI", bold: an.bold !== false,
+                 italic: !!an.italic, label: !!an.label };
       selected = edit;
-    } else typing = { x: p.x, y: p.y, fs: (TEXT_PX[size] || 24) / z, color };
-    const px = typing.fs * z;
-    Object.assign(box.style, { fontSize: `${px}px`, color: typing.color, width: "60px", height: `${px * 1.3}px` });
+      showTextStyle(typing);
+    } else typing = { x: p.x, y: p.y, fs: (TEXT_PX[size] || 24) / z, color, ...textStyle };
+    styleTextBox();
     box.value = edit !== undefined ? doc.annots[edit].text : "";
     box.hidden = false;
     placeFloaters();
     fitTextBox();
     paint();
     setTimeout(() => { box.focus(); if (edit !== undefined) box.select(); }, 0);
+  }
+  function styleTextBox() {
+    const box = $("textBox"), px = typing.fs * z;
+    Object.assign(box.style, {
+      fontSize: `${px}px`, fontFamily: FONTS[typing.font] || FONTS["Segoe UI"], fontWeight: typing.bold ? "700" : "400",
+      fontStyle: typing.italic ? "italic" : "normal", color: typing.label ? ink(typing.color) : typing.color,
+      background: typing.label ? typing.color : "rgba(18, 20, 23, .35)", width: "60px", height: `${px * 1.3}px`,
+    });
+    fitTextBox();
+  }
+  function showTextStyle(t) {                    // the font controls follow the text being edited / selected
+    $("font").value = t.font || "Segoe UI";
+    $("bold").setAttribute("aria-pressed", String(t.bold !== false));
+    $("italic").setAttribute("aria-pressed", String(!!t.italic));
+    $("label").setAttribute("aria-pressed", String(!!t.label));
+  }
+  function setTextStyle(change) {                // a font control changed: new text, the text being typed, the selected text
+    Object.assign(textStyle, change);
+    showTextStyle(textStyle);
+    if (typing) {
+      Object.assign(typing, change);
+      styleTextBox();
+      $("textBox").focus();
+    } else restyleSelected((an) => (an.type === "text" ? change : null));
   }
   function fitTextBox() {
     const box = $("textBox");
@@ -726,11 +797,12 @@
     box.hidden = true;
     if (t.edit !== undefined) {
       const old = doc.annots[t.edit];
-      if (old && (text !== old.text || t.color !== old.color)) {
+      const styled = ["font", "bold", "italic", "label"].some((k) => (old && (old[k] ?? (k === "bold" ? true : k === "font" ? "Segoe UI" : false))) !== t[k]);
+      if (old && (text !== old.text || t.color !== old.color || styled)) {
         change(() => {
           doc.annots = doc.annots.slice();
           if (text.trim()) {
-            const c = { ...old, text, color: t.color };
+            const c = { ...old, text, color: t.color, font: t.font, bold: t.bold, italic: t.italic, label: t.label };
             remeasure(c);
             doc.annots[t.edit] = c;
           } else {
@@ -740,7 +812,8 @@
         });
       }
     } else if (text.trim()) {
-      const c = { type: "text", color: t.color, x: t.x, y: t.y, fs: t.fs, text };
+      const c = { type: "text", color: t.color, x: t.x, y: t.y, fs: t.fs, text, font: t.font, bold: t.bold, italic: t.italic,
+                  label: t.label };
       remeasure(c);
       change(() => doc.annots.push(c));
     }
@@ -954,14 +1027,28 @@
     });
     $("cropApply").addEventListener("click", applyCrop);
     $("cropCancel").addEventListener("click", cancelCrop);
+    for (const name of Object.keys(FONTS)) {
+      const o = document.createElement("option");
+      o.value = o.textContent = name;
+      o.style.fontFamily = FONTS[name];
+      $("font").append(o);
+    }
+    $("font").addEventListener("change", (e) => setTextStyle({ font: e.target.value }));
+    $("bold").addEventListener("click", () => setTextStyle({ bold: $("bold").getAttribute("aria-pressed") !== "true" }));
+    $("italic").addEventListener("click", () => setTextStyle({ italic: $("italic").getAttribute("aria-pressed") !== "true" }));
+    $("label").innerHTML = svg('<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5z" ' +
+                               'fill="currentColor" fill-opacity=".25"/><path d="M8.5 9h7M12 9v6.5"/>');
+    $("label").addEventListener("click", () => setTextStyle({ label: $("label").getAttribute("aria-pressed") !== "true" }));
+    showTextStyle(textStyle);
     setTool("select");
   }
   function pickColor(hex, button) {
     color = hex;
     document.querySelectorAll("#colors .swatch").forEach((b) => b.setAttribute("aria-pressed", String(b === button)));
     document.querySelector(".swatch.custom").classList.toggle("on", !button);
-    if (typing) { typing.color = hex; $("textBox").style.color = hex; }
+    if (typing) { typing.color = hex; styleTextBox(); }
     else if (base) restyleSelected(() => ({ color: hex }));
+    if (tool !== "select") stage.style.cursor = cursorFor(tool);
   }
   function markPdf() {
     document.querySelectorAll("#pdfMenu [data-pdf]").forEach((b) => b.setAttribute("aria-checked", String(b.dataset.pdf === pdfMode)));
@@ -969,7 +1056,7 @@
   }
 
   document.addEventListener("keydown", (e) => {
-    if (!base || typing || e.target.closest?.("input, textarea")) return;
+    if (!base || typing || e.target.closest?.("input, textarea, select")) return;
     const k = e.key.toLowerCase();
     if (e.ctrlKey || e.metaKey) {
       if (k === "z" && !e.shiftKey) { e.preventDefault(); undo(); }

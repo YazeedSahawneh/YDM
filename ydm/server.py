@@ -6,6 +6,8 @@ POST /add   -> {"url": "...", "kind": "file"|"video"|"batch"|"gallery", "filenam
                 "video_format", "convert", "quick" (start without asking)}
                 gallery = every photo/video of the post at url (gallery-dl)
 POST /info  -> {"url", "cookies", "userAgent", "referrer"} → the video's quality list
+POST /probe -> {"url", "cookies", "userAgent", "referrer", "mime"} → {"ok": bool, "reason"}: can YDM fetch it
+               by itself? (the extension asks before taking a download away from the browser)
 """
 from __future__ import annotations
 
@@ -22,6 +24,7 @@ ALLOWED_ORIGINS = ("chrome-extension://", "moz-extension://", "extension://")
 class _Handler(BaseHTTPRequestHandler):
     on_add: Callable[[dict], None] = staticmethod(lambda payload: None)
     on_info: Callable[[dict], dict] = staticmethod(lambda payload: {"error": "not available"})
+    on_probe: Callable[[dict], dict] = staticmethod(lambda payload: {"ok": True})
 
     def log_message(self, *args):  # silence console
         pass
@@ -58,7 +61,7 @@ class _Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self._origin_ok():
             return self._send(403, {"error": "forbidden"})
-        if not self.path.startswith(("/add", "/info")):
+        if not self.path.startswith(("/add", "/info", "/probe")):
             return self._send(404, {"error": "not found"})
         try:
             length = min(int(self.headers.get("Content-Length", 0)), 1_000_000)
@@ -68,6 +71,11 @@ class _Handler(BaseHTTPRequestHandler):
         url = str(payload.get("url", ""))
         if not url.lower().startswith(("http://", "https://", "ftp://", "ftps://")):
             return self._send(400, {"error": "only http/https urls"})
+        if self.path.startswith("/probe"):
+            try:
+                return self._send(200, type(self).on_probe(payload))
+            except Exception as exc:  # noqa: BLE001 - when in doubt the browser keeps the download
+                return self._send(200, {"ok": False, "reason": str(exc)[:200]})
         if self.path.startswith("/info"):
             try:
                 return self._send(200, type(self).on_info(payload))
@@ -79,10 +87,13 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 class LocalServer:
-    def __init__(self, port: int, on_add: Callable[[dict], None], on_info: Callable[[dict], dict] | None = None):
+    def __init__(self, port: int, on_add: Callable[[dict], None], on_info: Callable[[dict], dict] | None = None,
+                 on_probe: Callable[[dict], dict] | None = None):
         attrs = {"on_add": staticmethod(on_add)}
         if on_info:
             attrs["on_info"] = staticmethod(on_info)
+        if on_probe:
+            attrs["on_probe"] = staticmethod(on_probe)
         handler = type("Handler", (_Handler,), attrs)
         self.httpd = ThreadingHTTPServer(("127.0.0.1", port), handler)   # raises OSError if busy
         self.httpd.daemon_threads = True

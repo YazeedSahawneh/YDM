@@ -1,5 +1,5 @@
 const DEFAULTS = { enabled: true, videoButton: true, imageButton: true, port: 9614, minSizeKB: 0, skipExt: "",
-                   buttonCorner: "tr", hiddenSites: [] };
+                   buttonCorner: "tr", hiddenSites: [], catchPlayable: true, catchPdf: false };
 const $ = (id) => document.getElementById(id);
 
 function size(n) {
@@ -15,6 +15,10 @@ async function init() {
   $("enabled").checked = s.enabled;
   $("videoButton").checked = s.videoButton;
   $("imageButton").checked = s.imageButton;
+  for (const id of ["catchPlayable", "catchPdf"]) {
+    $(id).checked = s[id];
+    $(id).addEventListener("change", (e) => chrome.storage.local.set({ [id]: e.target.checked }));
+  }
   $("port").value = s.port;
   $("minSizeKB").value = s.minSizeKB;
   $("skipExt").value = s.skipExt;
@@ -88,11 +92,46 @@ async function access() {
   });
 }
 
+const KIND = (type) => (/^video\//.test(type) ? "video file" : /^audio\//.test(type) ? "audio file" : type === "application/pdf" ? "PDF file"
+  : /^image\//.test(type) ? "picture" : /^text\//.test(type) ? "text file" : "file");
+
 async function showMedia(tabId) {
-  const list = await chrome.runtime.sendMessage({ type: "media-list", tabId });
-  if (!list || !list.length) return;
+  const info = await chrome.runtime.sendMessage({ type: "media-list", tabId });
+  if (!info) return;
+  const { list, segments, doc, kept } = info;
+  // the tab itself is a file the browser opened (a video, a PDF…)
+  if (doc && doc.url) {
+    $("docName").textContent = doc.name;
+    $("docName").title = doc.url;
+    $("docMeta").textContent = `This tab is a ${KIND(doc.type)}${doc.size ? ` · ${size(doc.size)}` : ""}`;
+    $("docCard").classList.add("show");
+    $("docGet").addEventListener("click", async () => {
+      $("docGet").disabled = true;
+      const ok = await chrome.runtime.sendMessage({ type: "send-media", url: doc.url, kind: "file", page: "" });
+      $("docGet").textContent = ok ? "Sent" : "Retry";
+      $("docGet").disabled = ok;
+    });
+  }
+  // the last download YDM left to the browser, and why
+  if (kept && Date.now() - kept.at < 10 * 60 * 1000) {
+    const k = $("kept");
+    k.textContent = "";
+    const b = document.createElement("b");
+    b.textContent = kept.name;
+    k.append(b, ` stayed in the browser: ${kept.reason}.`);
+    k.classList.add("show");
+  }
+  if (!list.length && !segments) return;
   const box = $("media");
   box.textContent = "";
+  if (!list.length) {
+    const e = document.createElement("div");
+    e.className = "empty";
+    e.textContent = `This page plays a stream in ${segments} pieces but no playlist YDM can use was seen yet. ` +
+      "Reload the page and play it again, or use “Download the video on this tab”.";
+    box.append(e);
+    return;
+  }
   for (const m of list) {
     const row = document.createElement("div");
     row.className = "row";
@@ -103,7 +142,13 @@ async function showMedia(tabId) {
     title.title = m.url;
     const meta = document.createElement("div");
     meta.className = "meta";
-    meta.textContent = [m.kind === "video" ? "stream" : (m.type || "media"), size(m.size)].filter(Boolean).join(" · ");
+    const what = m.stream === "master" ? "stream · every quality" : m.stream === "dash" ? "DASH stream · whole video"
+      : m.stream === "quality" ? "stream · one quality" : m.kind === "video" ? "stream" : `${m.whole ? "whole " : ""}${KIND(m.type)}`;
+    meta.innerHTML = "";
+    const tag = document.createElement("span");
+    tag.className = m.kind === "video" ? "tag" : "";
+    tag.textContent = what;
+    meta.append(tag, m.size ? ` · ${size(m.size)}` : "");
     name.append(title, meta);
     const btn = document.createElement("button");
     btn.textContent = "Download";
@@ -116,6 +161,12 @@ async function showMedia(tabId) {
     });
     row.append(name, btn);
     box.append(row);
+  }
+  if (segments) {
+    const e = document.createElement("div");
+    e.className = "empty";
+    e.textContent = `${segments} small pieces of a stream were left out: the stream above is the whole video.`;
+    box.append(e);
   }
 }
 

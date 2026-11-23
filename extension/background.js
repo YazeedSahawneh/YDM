@@ -5,7 +5,8 @@
 
 if (typeof importScripts === "function") importScripts("shotdb.js");   // Firefox loads it from the manifest
 
-const DEFAULTS = { enabled: true, videoButton: true, imageButton: true, port: 9614, minSizeKB: 0, skipExt: "" };
+const DEFAULTS = { enabled: true, videoButton: true, imageButton: true, port: 9614, minSizeKB: 0, skipExt: "",
+                   catchPlayable: true, catchPdf: false };
 const bypass = new Set();          // URLs we deliberately give back to the browser
 
 const getSettings = () => chrome.storage.local.get(DEFAULTS);
@@ -47,6 +48,29 @@ async function sendToApp(payload) {
   } catch { return false; }
 }
 
+async function probe(url, referrer, mime, port) {
+  try {
+    const r = await fetch(`${base(port)}/probe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ url, referrer, mime, cookies: await cookiesFor(url), userAgent: navigator.userAgent }),
+      signal: AbortSignal.timeout(12000),
+    });
+    if (r.status === 404) return { ok: true };       // an older YDM without the check: as before
+    return await r.json();
+  } catch {
+    return { ok: false, reason: "YDM took too long to check the link" };
+  }
+}
+
+// Shown in the popup: which download stayed in the browser, and why
+async function keptInBrowser(name, reason) {
+  await chrome.storage.session.set({ kept: { name, reason, at: Date.now() } });
+  chrome.action.setBadgeBackgroundColor({ color: "#FFB547" }).catch(() => {});
+  chrome.action.setBadgeText({ text: "web" }).catch(() => {});
+  setTimeout(() => chrome.action.setBadgeText({ text: "" }).catch(() => {}), 5000);
+}
+
 function extOf(name) {
   const m = /\.([a-z0-9]{1,8})(?:$|\?)/i.exec(name || "");
   return m ? m[1].toLowerCase() : "";
@@ -62,6 +86,17 @@ chrome.downloads.onCreated.addListener(async (item) => {
   const skip = s.skipExt.split(",").map((x) => x.trim().toLowerCase()).filter(Boolean);
   if (skip.length && skip.includes(extOf(item.filename || url))) return;
   if (!(await ping(s.port))) return;               // app not running → leave it to the browser
+
+  // Can YDM fetch this by itself? Some files need more than the link (a login token, a form the page
+  // posts, a check page): those stay in the browser instead of failing in YDM. The browser keeps
+  // downloading while YDM checks, so nothing is lost either way.
+  const verdict = await probe(url, item.referrer || "", item.mime || "", s.port);
+  if (!verdict.ok) {
+    await keptInBrowser((item.filename || url).split(/[\\/]/).pop(), verdict.reason);
+    return;
+  }
+  const [now] = await chrome.downloads.search({ id: item.id }).catch(() => []);
+  if (!now || now.state === "complete") return;    // the browser already has it: one copy is enough
 
   try {
     await chrome.downloads.cancel(item.id);
@@ -83,44 +118,111 @@ chrome.downloads.onCreated.addListener(async (item) => {
 // ---- media sniffer: streams the page plays (listed in the popup) -----------
 const MEDIA_TYPES = /^(video\/|audio\/|application\/(vnd\.apple\.mpegurl|x-mpegurl|dash\+xml))/i;
 const MANIFEST = /\.(m3u8|mpd)(\?|$)/i;
-const FRAGMENT = /\.(ts|m4s|aac|vtt|webvtt)(\?|$)|[?&](range|rn|rbuf)=|\/seg-?\d|segment\d/i;
+// pieces of a stream (HLS / DASH segments): useless one by one
+const FRAGMENT = /\.(ts|m4s|aac|vtt|webvtt|cmfv|cmfa)(\?|$)|(^|[\/_.-])(seg(ment)?|frag(ment)?|chunk)[-_]?\d+/i;
+// query keys some players use to ask for one piece of a file: the whole file is the same address without them
+const RANGE_KEYS = /^(range|bytestart|byteend|rn|rbuf|bytes|start_byte|end_byte)$/i;
+function wholeFile(u) {
+  const x = new URL(u);
+  let piece = false;
+  for (const k of [...x.searchParams.keys()]) if (RANGE_KEYS.test(k)) { x.searchParams.delete(k); piece = true; }
+  const path = x.pathname.replace(/\/range\/\d+-\d*/i, "");
+  if (path !== x.pathname) { x.pathname = path; piece = true; }
+  return { url: x.href, piece };
+}
 const SKIP_HOSTS = /(^|\.)googlevideo\.com$|(^|\.)doubleclick\.net$|(^|\.)googlesyndication\.com$/i;
 const key = (tabId) => `media:${tabId}`;
 
-async function remember(tabId, entry) {
-  const k = key(tabId);
-  const list = (await chrome.storage.session.get(k))[k] || [];
-  if (list.some((m) => m.url === entry.url)) return;
-  list.unshift(entry);
-  await chrome.storage.session.set({ [k]: list.slice(0, 25) });
-  chrome.action.setBadgeBackgroundColor({ color: "#3DDBC0", tabId });
-  chrome.action.setBadgeText({ text: String(list.length), tabId });
+let remembering = Promise.resolve();               // one update at a time (responses arrive together)
+function remember(tabId, entry) {
+  remembering = remembering.then(async () => {
+    const k = key(tabId);
+    const list = (await chrome.storage.session.get(k))[k] || [];
+    const had = list.find((m) => m.url === entry.url);
+    if (had) {                                      // the same file again (another piece): keep the biggest size
+      if (entry.size > had.size) { had.size = entry.size; await chrome.storage.session.set({ [k]: list }); }
+      return;
+    }
+    list.unshift(entry);
+    await chrome.storage.session.set({ [k]: list.slice(0, 25) });
+    chrome.action.setBadgeBackgroundColor({ color: "#3DDBC0", tabId });
+    chrome.action.setBadgeText({ text: String(list.length), tabId });
+  }).catch(() => {});
+  return remembering;
+}
+async function countSegment(tabId) {
+  const k = `segs:${tabId}`;
+  const n = ((await chrome.storage.session.get(k))[k] || 0) + 1;
+  await chrome.storage.session.set({ [k]: n });
+}
+// An HLS playlist is either the master (every quality) or one quality's list of segments: read it to say which
+async function playlistKind(url) {
+  try {
+    const r = await fetch(url, { credentials: "include", signal: AbortSignal.timeout(5000) });
+    const text = (await r.text()).slice(0, 65536);
+    if (text.includes("#EXT-X-STREAM-INF")) return "master";
+    if (text.includes("#EXTINF")) return "quality";
+  } catch { /* unreadable: list it plainly */ }
+  return "";
 }
 
-chrome.webRequest.onResponseStarted.addListener((d) => {
+chrome.webRequest.onResponseStarted.addListener(async (d) => {
   if (d.tabId < 0 || !/^https?:/i.test(d.url) || d.statusCode >= 400) return;
   let host = "";
   try { host = new URL(d.url).hostname; } catch { return; }
   if (SKIP_HOSTS.test(host)) return;                      // YouTube chunks: the video button handles YouTube
   const header = (name) => (d.responseHeaders || []).find((h) => h.name.toLowerCase() === name)?.value || "";
   const type = header("content-type").split(";")[0].trim();
-  const size = Number(header("content-length")) || 0;
+  const page = d.initiator || d.documentUrl || d.originUrl || "";          // Chromium || Firefox
   const isManifest = MANIFEST.test(d.url) || /mpegurl|dash\+xml/i.test(type);
-  if (!isManifest && (!MEDIA_TYPES.test(type) || FRAGMENT.test(d.url) || (size && size < 512 * 1024))) return;
-  const name = decodeURIComponent(new URL(d.url).pathname.split("/").pop() || host);
-  remember(d.tabId, {
-    url: d.url, name, size, type, kind: isManifest ? "video" : "file",
-    page: d.initiator || d.documentUrl || d.originUrl || "",          // Chromium || Firefox
-  });
+  if (isManifest) {
+    const dash = /\.mpd(\?|$)/i.test(d.url) || /dash/i.test(type);
+    const kind = dash ? "dash" : await playlistKind(d.url);
+    const name = decodeURIComponent(new URL(d.url).pathname.split("/").pop() || host);
+    return remember(d.tabId, { url: d.url, name, size: 0, type, kind: "video", stream: dash ? "dash" : kind || "hls", page });
+  }
+  if (!MEDIA_TYPES.test(type)) return;
+  const { url, piece } = wholeFile(d.url);
+  const range = /\/(\d+)\s*$/.exec(header("content-range"));
+  if (!piece && !range && FRAGMENT.test(d.url)) return countSegment(d.tabId);
+  // one piece of a bigger file (a player asking for 2 MB at a time): the whole file is what's worth having
+  const size = range ? Number(range[1]) : Number(header("content-length")) || 0;
+  if (size && size < 512 * 1024) return;
+  const name = decodeURIComponent(new URL(url).pathname.split("/").pop() || host);
+  remember(d.tabId, { url, name, size, type, kind: "file", whole: piece || !!range, page });
 }, { urls: ["<all_urls>"], types: ["media", "xmlhttprequest", "other"] }, ["responseHeaders"]);
+
+// ---- files the browser opens itself (a video, a song, a PDF in a tab) -------------------------------------
+// They never become downloads, so the download catcher never sees them. Remember what each tab is showing
+// (the popup offers "Download with YDM"), and hand videos and music (and PDFs, if wanted) to YDM by itself.
+const PLAYABLE = /^(video|audio)\//i;
+const recentlyCaught = new Map();
+chrome.webRequest.onResponseStarted.addListener(async (d) => {
+  if (d.tabId < 0 || !/^https?:/i.test(d.url) || d.statusCode >= 400) return;
+  const header = (name) => (d.responseHeaders || []).find((h) => h.name.toLowerCase() === name)?.value || "";
+  const type = header("content-type").split(";")[0].trim().toLowerCase();
+  const doc = `doc:${d.tabId}`;
+  if (!type || /^text\/html|^application\/xhtml/.test(type)) { chrome.storage.session.remove(doc); return; }
+  const size = Number(header("content-length")) || 0;
+  const disp = /filename\*?=(?:UTF-8'')?"?([^";]+)/i.exec(header("content-disposition"));
+  const name = decodeURIComponent((disp && disp[1]) || new URL(d.url).pathname.split("/").pop() || "file");
+  await chrome.storage.session.set({ [doc]: { url: d.url, type, size, name } });
+  const s = await getSettings();
+  const wanted = s.enabled && ((s.catchPlayable && PLAYABLE.test(type)) || (s.catchPdf && type === "application/pdf"));
+  const last = recentlyCaught.get(d.url) || 0;
+  if (!wanted || Date.now() - last < 60000 || !(await ping(s.port))) return;          // a reload isn't a new download
+  recentlyCaught.set(d.url, Date.now());
+  const ok = await sendToApp({ url: d.url, kind: "file", filename: name, referrer: d.initiator || "", fileSize: size });
+  if (!ok) recentlyCaught.delete(d.url);
+}, { urls: ["<all_urls>"], types: ["main_frame"] }, ["responseHeaders"]);
 
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (info.url) {                                         // new page in this tab: forget old streams
-    chrome.storage.session.remove(key(tabId));
+    chrome.storage.session.remove([key(tabId), `segs:${tabId}`]);
     chrome.action.setBadgeText({ text: "", tabId });
   }
 });
-chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove(key(tabId)));
+chrome.tabs.onRemoved.addListener((tabId) => chrome.storage.session.remove([key(tabId), `segs:${tabId}`, `doc:${tabId}`]));
 
 // ---- right-click menus -----------------------------------------------------
 chrome.runtime.onInstalled.addListener(() => {
@@ -169,6 +271,10 @@ chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   }
   if (!ok) await flagOffline();
 });
+
+// streams first (the master playlist before single qualities), then whole files, biggest first
+const rank = (m) => (m.stream === "master" || m.stream === "dash" ? 0 : m.stream === "hls" ? 1 : m.stream === "quality" ? 2 : 3)
+  * 1e15 - (m.size || 0);
 
 async function flagOffline() {
   await chrome.action.setBadgeBackgroundColor({ color: "#FF6B5E" });
@@ -234,8 +340,14 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
     sendToApp({ url: msg.url, kind: msg.kind, referrer: msg.page || "" }).then(reply);
     return true;
   }
-  if (msg.type === "media-list") {
-    chrome.storage.session.get(key(msg.tabId)).then((r) => reply(r[key(msg.tabId)] || []));
+  if (msg.type === "media-list" || msg.type === "media-here") {
+    const tabId = msg.type === "media-here" ? sender.tab?.id : msg.tabId;
+    const k = [key(tabId), `segs:${tabId}`, `doc:${tabId}`, "kept"];
+    chrome.storage.session.get(k).then((r) => {
+      const list = (r[key(tabId)] || []).slice().sort((a, b) => rank(a) - rank(b));
+      // a plain object: messages drop extra fields on arrays
+      reply({ list, segments: r[`segs:${tabId}`] || 0, doc: r[`doc:${tabId}`] || null, kept: r.kept || null });
+    });
     return true;
   }
   if (msg.type === "ping") {

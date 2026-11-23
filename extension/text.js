@@ -33,6 +33,16 @@
     up: '<path d="M7 14l5-5 5 5"/>',
     down: '<path d="M7 10l5 5 5-5"/>',
     close: '<path d="M7 7l10 10M17 7L7 17"/>',
+    customize: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+    preview: '<path d="M2.5 12s3.5-6.5 9.5-6.5 9.5 6.5 9.5 6.5-3.5 6.5-9.5 6.5S2.5 12 2.5 12z"/><circle cx="12" cy="12" r="2.8"/>',
+    compare: '<rect x="3.5" y="4" width="7" height="16" rx="1.5"/><rect x="13.5" y="4" width="7" height="16" rx="1.5"/><path d="M6 9h2M6 12h2M16 12h2M16 15h2"/>',
+    theme: '<circle cx="12" cy="12" r="7.5"/><path d="M12 4.5a7.5 7.5 0 0 1 0 15z" fill="currentColor"/>',
+    recent: '<circle cx="12" cy="12.5" r="7.5"/><path d="M12 8.5v4l3 2"/>',
+    goto: '<path d="M4 6h10M4 12h7M4 18h10"/><path d="M15 9l4 3-4 3"/>',
+    pin: '<path d="M9 4h6l-1 5 3 3v1.5H7V12l3-3z"/><path d="M12 13.5V20"/>',
+    up2: '<path d="M7 14l5-5 5 5"/>',
+    down2: '<path d="M7 10l5 5 5-5"/>',
+    plus: '<path d="M12 5v14M5 12h14"/>',
   };
   const TYPES = [["txt", "Text"], ["json", "JSON"], ["yaml", "YAML"], ["yml", "YAML"], ["xml", "XML"], ["md", "Markdown"],
                  ["csv", "CSV"], ["env", "Environment"], ["ini", "Settings (INI)"], ["log", "Log"], ["html", "HTML"],
@@ -45,7 +55,8 @@
   let check = { ok: true, message: "" };
   const pref = (k, d) => { try { return JSON.parse(localStorage.getItem(`ydm-text-${k}`)) ?? d; } catch { return d; } };
   const setPref = (k, v) => { try { localStorage.setItem(`ydm-text-${k}`, JSON.stringify(v)); } catch { /* private */ } };
-  let fontSize = pref("font", 13.5), wrap = pref("wrap", false);
+  let fontSize = pref("font", 13.5), wrap = pref("wrap", false), light = pref("light", false);
+  let pane = "";                                   // the side pane: "" | "preview" | "compare"
 
   // ---- little helpers ------------------------------------------------------------------------------------
   let toastTimer = 0;
@@ -153,6 +164,23 @@
       });
   }
 
+  function hlMarkdown(t) {
+    let fence = false;
+    return t.split("\n").map((line) => {
+      if (/^\s*(```|~~~)/.test(line)) { fence = !fence; return `<span class="c">${esc(line)}</span>`; }
+      if (fence) return `<span class="s">${esc(line)}</span>`;
+      if (/^#{1,6}\s/.test(line)) return `<span class="k">${esc(line)}</span>`;
+      let h = esc(line)
+        .replace(/^(\s*)([-*+]|\d+[.)])(\s)/, '$1<span class="p">$2</span>$3')
+        .replace(/^(\s*)(&gt;)/, '$1<span class="p">$2</span>')
+        .replace(/(`[^`]+`)/g, '<span class="s">$1</span>')
+        .replace(/(\*\*[^*]+\*\*|__[^_]+__)/g, '<span class="b">$1</span>')
+        .replace(/(\[[^\]]+\]\([^)\s]+\))/g, '<span class="a">$1</span>');
+      if (/^\s*\|/.test(line)) h = h.replace(/\|/g, '<span class="p">|</span>');
+      return h;
+    }).join("\n");
+  }
+
   let paintQueued = false;
   function paint() {
     if (paintQueued) return;
@@ -163,7 +191,7 @@
       const lit = v.length <= HL_LIMIT && kind !== "text";
       editor.classList.toggle("lit", lit);
       hl.hidden = !lit;
-      if (lit) hl.innerHTML = (kind === "json" ? hlJson(v) : kind === "yaml" ? hlYaml(v) : hlXml(v)) + "\n";
+      if (lit) hl.innerHTML = (kind === "json" ? hlJson(v) : kind === "yaml" ? hlYaml(v) : kind === "markdown" ? hlMarkdown(v) : hlXml(v)) + "\n";
       // line numbers, the first problem's line in red
       const n = v.split("\n").length;
       let nums = "";
@@ -177,7 +205,14 @@
     hl.style.right = `${ta.offsetWidth - ta.clientWidth}px`;
     hl.style.bottom = `${ta.offsetHeight - ta.clientHeight}px`;
   }
+  function markCurrentLine() {
+    const cur = $("curLine");
+    if (wrap || ta.selectionStart !== ta.selectionEnd || document.activeElement !== ta) { cur.hidden = true; return; }
+    cur.hidden = false;
+    cur.style.top = `${12 + (lineOf(ta.selectionStart) - 1) * lineHeight() - ta.scrollTop}px`;
+  }
   function sync() {
+    markCurrentLine();
     hl.scrollTop = ta.scrollTop;
     hl.scrollLeft = ta.scrollLeft;
     gutter.scrollTop = ta.scrollTop;
@@ -210,8 +245,13 @@
     $("eol").textContent = v.includes("\r\n") ? "CRLF" : "LF";
     $("save").innerHTML = `${svg(ICON.save)}Save .${saveType || defaultType()}`;
     const locked = v.trimStart().startsWith(PREFIX);
-    $("lock").innerHTML = `${svg(locked ? ICON.unlock : ICON.lock)}<span class="long">${locked ? "Decrypt" : "Encrypt"}</span>`;
-    $("lock").title = locked ? "Decrypt with the password" : "Encrypt with a password (AES-256)";
+    if ($("lock")) {
+      $("lock").innerHTML = `${svg(locked ? ICON.unlock : ICON.lock)}<span class="long">${locked ? "Decrypt" : "Encrypt"}</span>`;
+      $("lock").title = locked ? "Decrypt with the password" : "Encrypt with a password (AES-256)";
+    }
+    const pillText = $("check").querySelector("span");
+    if (kind === "markdown" || kind === "html") pillText.textContent = kind === "html" ? "HTML" : "Markdown";
+    if (pane === "preview") showPreview();
     paint();
   }
   function position() {
@@ -220,7 +260,8 @@
     $("pos").textContent = `Ln ${lineOf(a).toLocaleString()}, Col ${before.length + 1}`;
     $("selInfo").textContent = a !== b ? `${(b - a).toLocaleString()} selected` : "";
   }
-  document.addEventListener("selectionchange", () => { if (document.activeElement === ta) position(); });
+  document.addEventListener("selectionchange", () => { if (document.activeElement === ta) { position(); markCurrentLine(); } });
+  ta.addEventListener("blur", () => { $("curLine").hidden = true; });
   $("check").addEventListener("click", () => {
     if (check.ok || !check.line) return;
     goToLine(check.line, check.col || 1);
@@ -291,7 +332,12 @@
     if (!opt.insert && !input) { toast("Nothing to work on yet: type or paste some text first.", true); return false; }
     try {
       let out;
-      if (opt.password) {
+      if (opt.secret) {
+        const v = await dialog({ title: "HMAC-SHA256", text: "The secret key the signature is made with.",
+                                 fields: [{ label: "Key", type: "password" }], ok: "Sign", validate: ([k]) => (k ? "" : "Type the key.") });
+        if (!v) return false;
+        out = await TextKit.hmac(input, v[0]);
+      } else if (opt.password) {
         const pw = await askPassword(opt.password);
         if (pw === null) return false;
         toast(opt.password === "new" ? "Encrypting…" : "Decrypting…");
@@ -348,7 +394,24 @@
       b.setAttribute("role", "option");
       b.dataset.i = i;
       b.textContent = t[2];
-      if (t[4] && t[4].insert) { const s = document.createElement("span"); s.textContent = "inserts"; b.append(s); }
+      const side = document.createElement("span");
+      side.className = "side";
+      if (t[4] && t[4].insert) side.append("inserts ");
+      const pin = document.createElement("i");
+      const pinned = bar.includes(`tool:${t[1]}`);
+      pin.className = `pin${pinned ? " on" : ""}`;
+      pin.title = pinned ? "Take it off the bar" : "Pin it to the bar";
+      pin.innerHTML = svg(ICON.pin);
+      pin.addEventListener("click", (e) => {
+        e.stopPropagation();
+        togglePin(t[1]);
+        const now = bar.includes(`tool:${t[1]}`);
+        pin.classList.toggle("on", now);
+        pin.title = now ? "Take it off the bar" : "Pin it to the bar";
+        toast(now ? `${t[2]} is on the bar` : `${t[2]} is off the bar`);
+      });
+      side.append(pin);
+      b.append(side);
       b.addEventListener("click", () => { closePalette(false); runTool(t); });
       b.addEventListener("mousemove", () => markPalette(i));
       list.append(b);
@@ -372,7 +435,8 @@
     else if (e.key === "Escape") { e.preventDefault(); closePalette(); }
   });
   document.addEventListener("mousedown", (e) => {
-    if (!$("palette").hidden && !$("palette").contains(e.target) && e.target !== $("plugins") && !$("plugins").contains(e.target)) closePalette(false);
+    if (!$("palette").hidden && !$("palette").contains(e.target) && !($("plugins") && $("plugins").contains(e.target))) closePalette(false);
+    if (!$("recentMenu").hidden && !$("recentMenu").contains(e.target) && !$("recent").contains(e.target)) $("recentMenu").hidden = true;
     if (!$("saveMenu").hidden && !$("saveMenu").contains(e.target) && !$("saveMore").contains(e.target)) $("saveMenu").hidden = true;
   });
 
@@ -388,9 +452,10 @@
       const inputs = fields.map((f) => {
         const label = document.createElement("label");
         label.textContent = f.label;
-        const input = document.createElement("input");
-        input.type = f.type || "text";
-        input.autocomplete = "new-password";
+        const input = document.createElement(f.type === "textarea" ? "textarea" : "input");
+        if (f.type !== "textarea") { input.type = f.type || "text"; input.autocomplete = "new-password"; }
+        else { input.rows = 10; input.spellcheck = false; }
+        if (f.value) input.value = f.value;
         label.append(input);
         box.append(label);
         return input;
@@ -423,7 +488,7 @@
       $("modalCancel").onclick = () => done(null);
       m.onkeydown = (e) => {
         if (e.key === "Escape") { e.preventDefault(); done(null); }
-        if (e.key === "Enter") { e.preventDefault(); $("modalOk").onclick(); }
+        if (e.key === "Enter" && (e.target.tagName !== "TEXTAREA" || e.ctrlKey)) { e.preventDefault(); $("modalOk").onclick(); }
       };
     });
   }
@@ -616,21 +681,300 @@
     document.documentElement.style.setProperty("--lh", `${lineHeight()}px`);
     editor.classList.toggle("wrap", wrap);
     ta.setAttribute("wrap", wrap ? "soft" : "off");
-    $("wrap").setAttribute("aria-pressed", String(wrap));
+    if ($("wrap")) $("wrap").setAttribute("aria-pressed", String(wrap));
+    document.documentElement.dataset.theme = light ? "light" : "dark";
+    if ($("theme")) $("theme").setAttribute("aria-pressed", String(light));
     paint();
   }
   const zoom = (d) => { fontSize = Math.min(24, Math.max(10, fontSize + d)); setPref("font", fontSize); applyView(); };
+
+  // ---- the bar: the user picks the buttons, their order, and pins tools -----------------------------------------
+  // [icon, label shown on the button ("" = icon only), tooltip, what it does]
+  const BUILTIN = {
+    plugins: ["plugins", "Plugins", "All the tools (Ctrl+Shift+P)", () => ($("palette").hidden ? openPalette() : closePalette())],
+    format: ["format", "Format", "Format JSON / YAML / XML (Shift+Alt+F)", () => format()],
+    secrets: ["secrets", "Hide secrets", "Hide passwords, keys and tokens", () => runTool(byId("secrets"))],
+    lock: ["lock", "Encrypt", "Encrypt with a password (AES-256)",
+           () => runTool(byId(ta.value.trimStart().startsWith(PREFIX) ? "decrypt" : "encrypt"))],
+    preview: ["preview", "Preview", "Show Markdown or HTML as it looks (Ctrl+Shift+V)", () => togglePane("preview")],
+    compare: ["compare", "Compare", "Compare with another text: what was added and removed", () => compare()],
+    goto: ["goto", "", "Go to a line (Ctrl+G)", () => goToLineAsk()],
+    find: ["find", "", "Find and replace (Ctrl+F / Ctrl+H)", () => ($("findBar").hidden ? openFind() : ($("findBar").hidden = true))],
+    wrap: ["wrap", "", "Wrap long lines (Alt+Z)", () => { wrap = !wrap; setPref("wrap", wrap); applyView(); }],
+    smaller: ["smaller", "", "Smaller text (Ctrl+−)", () => zoom(-1)],
+    bigger: ["bigger", "", "Bigger text (Ctrl++)", () => zoom(1)],
+    undo: ["undo", "", "Undo (Ctrl+Z)", () => { ta.focus(); document.execCommand("undo"); }],
+    redo: ["redo", "", "Redo (Ctrl+Y)", () => { ta.focus(); document.execCommand("redo"); }],
+    theme: ["theme", "", "Light or dark", () => { light = !light; setPref("light", light); applyView(); }],
+    spacer: [null, "Space", "Pushes what follows to the right"],
+  };
+  const DEFAULT_BAR = ["plugins", "format", "secrets", "lock", "preview", "compare", "spacer", "find", "goto", "wrap",
+                       "smaller", "bigger", "undo", "redo", "theme"];
+  let bar = pref("bar", DEFAULT_BAR).filter((id) => BUILTIN[id] || (id.startsWith("tool:") && byId(id.slice(5))));
+  function saveBar() { setPref("bar", bar); renderBar(); }
+  function togglePin(toolId) {
+    const key = `tool:${toolId}`;
+    if (bar.includes(key)) bar = bar.filter((x) => x !== key);
+    else { const at = bar.indexOf("spacer"); bar.splice(at < 0 ? bar.length : at, 0, key); }
+    saveBar();
+  }
+  function itemLabel(id) {
+    if (id.startsWith("tool:")) return byId(id.slice(5))[2];
+    return BUILTIN[id][1] || BUILTIN[id][2].replace(/ \(.*\)$/, "");
+  }
+  function renderBar() {
+    const box = $("bar");
+    box.textContent = "";
+    for (const id of bar) {
+      if (id === "spacer") { box.append(Object.assign(document.createElement("div"), { className: "spacer" })); continue; }
+      const b = document.createElement("button");
+      if (id.startsWith("tool:")) {
+        const t = byId(id.slice(5));
+        b.className = "btn pinned";
+        b.id = `tool-${t[1]}`;
+        b.textContent = t[2];
+        b.title = `${t[2]} (${t[0]}). Customize the bar to take it off.`;
+        b.addEventListener("click", () => runTool(t));
+      } else {
+        const [icon, label, tip, run] = BUILTIN[id];
+        b.id = id;
+        b.className = label ? "btn" : "icon";
+        b.title = tip;
+        b.innerHTML = svg(ICON[icon]) + (label ? `<span class="long">${label}</span>` : "");
+        b.addEventListener("click", run);
+      }
+      box.append(b);
+    }
+    applyView();
+    if ($("preview")) $("preview").setAttribute("aria-pressed", String(pane === "preview"));
+    recheckSoon();
+  }
+  const recheckSoon = () => { clearTimeout(checkTimer); checkTimer = setTimeout(recheck, 0); };
+
+  function openCustomize() {
+    $("custom").hidden = false;
+    fillCustomize();
+    $("customDone").focus();
+  }
+  function fillCustomize() {
+    const on = $("onBar"), off = $("offBar");
+    on.textContent = off.textContent = "";
+    bar.forEach((id, i) => {
+      const r = document.createElement("div");
+      r.className = "crow";
+      const name = document.createElement("span");
+      name.textContent = itemLabel(id);
+      if (id.startsWith("tool:")) name.append(Object.assign(document.createElement("em"), { textContent: " pinned tool" }));
+      const btn = (icon, tip, fn, dis) => {
+        const x = document.createElement("button");
+        x.className = "icon small";
+        x.title = tip;
+        x.setAttribute("aria-label", tip);
+        x.innerHTML = svg(ICON[icon]);
+        x.disabled = !!dis;
+        x.addEventListener("click", fn);
+        return x;
+      };
+      r.append(name,
+        btn("up2", "Move left", () => { [bar[i - 1], bar[i]] = [bar[i], bar[i - 1]]; saveBar(); fillCustomize(); }, i === 0),
+        btn("down2", "Move right", () => { [bar[i + 1], bar[i]] = [bar[i], bar[i + 1]]; saveBar(); fillCustomize(); }, i === bar.length - 1),
+        btn("close", "Take it off the bar", () => { bar.splice(i, 1); saveBar(); fillCustomize(); }));
+      on.append(r);
+    });
+    for (const id of Object.keys(BUILTIN).filter((x) => !bar.includes(x))) {
+      const r = document.createElement("button");
+      r.className = "crow add";
+      r.innerHTML = `${svg(ICON.plus)}<span></span>`;
+      r.querySelector("span").textContent = itemLabel(id);
+      r.addEventListener("click", () => { bar.push(id); saveBar(); fillCustomize(); });
+      off.append(r);
+    }
+    if (!off.children.length) off.innerHTML = '<div class="muted small">Every button is on the bar.</div>';
+    fillPins();
+  }
+  function fillPins() {
+    const q = $("pinSearch").value.toLowerCase().split(/\s+/).filter(Boolean);
+    const list = $("pinList");
+    list.textContent = "";
+    const found = TOOLS.filter((t) => !bar.includes(`tool:${t[1]}`) && q.every((w) => `${t[0]} ${t[2]}`.toLowerCase().includes(w))).slice(0, 8);
+    for (const t of found) {
+      const r = document.createElement("button");
+      r.className = "crow add";
+      r.innerHTML = `${svg(ICON.pin)}<span></span><em></em>`;
+      r.querySelector("span").textContent = t[2];
+      r.querySelector("em").textContent = t[0];
+      r.addEventListener("click", () => { togglePin(t[1]); fillCustomize(); });
+      list.append(r);
+    }
+    if (!found.length) list.innerHTML = '<div class="muted small">No more tools by that name.</div>';
+  }
+
+  // ---- the side pane: preview, compare -------------------------------------------------------------------------
+  function togglePane(what) {
+    pane = pane === what ? "" : what;
+    $("pane").hidden = !pane;
+    if ($("preview")) $("preview").setAttribute("aria-pressed", String(pane === "preview"));
+    if (pane === "preview") showPreview();
+    fit();
+    sync();
+  }
+  let previewTimer = 0;
+  function showPreview() {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(() => {
+      const body = $("paneBody");
+      $("paneTitle").textContent = "Preview";
+      if (kind === "markdown" || (kind === "text" && ta.value.trim())) {
+        $("paneInfo").textContent = "Markdown";
+        body.className = "pbody md";
+        body.innerHTML = Markdown.render(ta.value);
+      } else if (kind === "html") {
+        $("paneInfo").textContent = "HTML (scripts off)";
+        body.className = "pbody frame";
+        let f = body.querySelector("iframe");
+        if (!f) {
+          body.textContent = "";
+          f = document.createElement("iframe");
+          f.setAttribute("sandbox", "");                  // no scripts, no access to anything
+          body.append(f);
+        }
+        f.srcdoc = ta.value;
+      } else {
+        $("paneInfo").textContent = "";
+        body.className = "pbody";
+        body.innerHTML = '<div class="muted">The preview shows Markdown and HTML. This text looks like ' +
+          `${kind === "text" ? "nothing yet" : kind.toUpperCase()}: pick Markdown or HTML in the list on the left if that's wrong.</div>`;
+      }
+    }, 150);
+  }
+  async function compare() {
+    const v = await dialog({ title: "Compare with another text", text: "Paste the other text: the old version, or the one to check against.",
+                             fields: [{ label: "The other text", type: "textarea" }], ok: "Compare",
+                             validate: ([x]) => (x ? "" : "Paste the other text first.") });
+    if (!v) return;
+    let rows;
+    try { rows = TextKit.lineDiff(v[0], ta.value); } catch (e) { toast(e.message, true); return; }
+    const plus = rows.filter((r) => r[0] === "+").length, minus = rows.filter((r) => r[0] === "-").length;
+    pane = "compare";
+    $("pane").hidden = false;
+    $("paneTitle").textContent = "Compared";
+    $("paneInfo").textContent = !plus && !minus ? "the same" : `+${plus} added  ·  −${minus} removed  (− the other text, + this one)`;
+    const body = $("paneBody");
+    body.className = "pbody diff";
+    body.textContent = "";
+    const keep = new Set();                           // unchanged lines shown: 2 around each change
+    rows.forEach((r, i) => { if (r[0] !== " ") for (let k = i - 2; k <= i + 2; k++) keep.add(k); });
+    let skipped = 0;
+    const flush = () => {
+      if (!skipped) return;
+      body.append(Object.assign(document.createElement("div"), { className: "skip", textContent: `… ${skipped} unchanged line${skipped === 1 ? "" : "s"} …` }));
+      skipped = 0;
+    };
+    rows.forEach((r, i) => {
+      if (r[0] === " " && !keep.has(i) && rows.length > 12) { skipped++; return; }
+      flush();
+      const d = document.createElement("div");
+      d.className = r[0] === "+" ? "add" : r[0] === "-" ? "del" : "same";
+      d.dataset.n = r[0] === "-" ? r[2] : r[3];
+      d.textContent = `${r[0]} ${r[1]}`;
+      body.append(d);
+    });
+    flush();
+    if ($("preview")) $("preview").setAttribute("aria-pressed", "false");
+    fit();
+    sync();
+  }
+
+  // ---- recent texts ------------------------------------------------------------------------------------------
+  async function fillRecent() {
+    const m = $("recentMenu");
+    m.textContent = "";
+    const add = (label, sub, fn) => {
+      const b = document.createElement("button");
+      b.setAttribute("role", "menuitem");
+      const t = document.createElement("div");
+      t.textContent = label;
+      const s = document.createElement("span");
+      s.textContent = sub;
+      b.append(t, s);
+      b.addEventListener("click", fn);
+      m.append(b);
+    };
+    add("New empty text", "", () => { location.hash = ""; location.reload(); });
+    const all = await TextDB.all().catch(() => []);
+    for (const r of all.filter((x) => x.id !== rec.id && (x.text || "").trim()).slice(0, 12)) {
+      const first = (r.text || "").trim().split("\n")[0].slice(0, 60);
+      add(r.title || first || "Text", `${new Date(r.updated || r.created).toLocaleString()}  ·  ${(r.text || "").length.toLocaleString()} characters`,
+          () => { location.hash = r.id; location.reload(); });
+    }
+    if (m.children.length === 1) m.append(Object.assign(document.createElement("div"), { className: "muted small pad", textContent: "Texts you copy with YDM show up here." }));
+  }
+
+  // ---- line commands: go to, duplicate, move, delete, comment -----------------------------------------------------
+  async function goToLineAsk() {
+    const n = ta.value.split("\n").length;
+    const v = await dialog({ title: "Go to line", text: `1 to ${n.toLocaleString()}`, fields: [{ label: "Line", type: "number" }], ok: "Go",
+                             validate: ([x]) => (+x >= 1 && +x <= n ? "" : `Type a line from 1 to ${n}.`) });
+    if (v) goToLine(+v[0]);
+  }
+  function lineSpan() {                             // the whole lines the selection touches
+    const v = ta.value, a = ta.selectionStart, b = ta.selectionEnd;
+    const ls = v.lastIndexOf("\n", a - 1) + 1;
+    let le = v.indexOf("\n", b > a && v[b - 1] === "\n" ? b - 1 : b);
+    if (le < 0) le = v.length;
+    return [ls, le];
+  }
+  function lineCommand(kindOf) {
+    const v = ta.value;
+    const [ls, le] = lineSpan();
+    const block = v.slice(ls, le);
+    if (kindOf === "dup") {
+      replaceRange(le, le, "\n" + block, false);
+      ta.setSelectionRange(le + 1, le + 1 + block.length);
+    } else if (kindOf === "del") {
+      const end = le < v.length ? le + 1 : le, start = le >= v.length && ls > 0 ? ls - 1 : ls;
+      replaceRange(start, end, "", false);
+    } else if (kindOf === "up" && ls > 0) {
+      const ps = v.lastIndexOf("\n", ls - 2) + 1;
+      const prev = v.slice(ps, ls - 1);
+      replaceRange(ps, le, block + "\n" + prev, false);
+      ta.setSelectionRange(ps, ps + block.length);
+    } else if (kindOf === "down" && le < v.length) {
+      let ne = v.indexOf("\n", le + 1);
+      if (ne < 0) ne = v.length;
+      const next = v.slice(le + 1, ne);
+      replaceRange(ls, ne, next + "\n" + block, false);
+      ta.setSelectionRange(ls + next.length + 1, ls + next.length + 1 + block.length);
+    } else if (kindOf === "comment") {
+      const mark = kind === "json" ? "" : "# ";
+      if (!mark) { toast("JSON has no comments.", true); return; }
+      const lines = block.split("\n");
+      const all = lines.every((l) => !l.trim() || l.trimStart().startsWith("#"));
+      const out = lines.map((l) => (!l.trim() ? l : all ? l.replace(/^(\s*)# ?/, "$1") : l.replace(/^(\s*)/, `$1${mark}`)));
+      replaceRange(ls, le, out.join("\n"));
+    }
+    markCurrentLine();
+  }
 
   // ---- buttons and keys ---------------------------------------------------------------------------------------
   function build() {
     $("open").innerHTML = `${svg(ICON.open)}<span class="long">Open</span>`;
     $("copy").innerHTML = `${svg(ICON.copy)}Copy`;
     $("saveMore").innerHTML = svg(ICON.caret);
-    $("plugins").innerHTML = `${svg(ICON.plugins)}Plugins`;
-    $("format").innerHTML = `${svg(ICON.format)}<span class="long">Format</span>`;
-    $("secrets").innerHTML = `${svg(ICON.secrets)}<span class="long">Hide secrets</span>`;
-    for (const [id, icon] of [["find", "find"], ["wrap", "wrap"], ["smaller", "smaller"], ["bigger", "bigger"], ["undo", "undo"],
-                              ["redo", "redo"], ["findPrev", "up"], ["findNext", "down"], ["findClose", "close"]]) $(id).innerHTML = svg(ICON[icon]);
+    $("recent").innerHTML = `${svg(ICON.recent)}<span class="long">Recent</span>`;
+    for (const [id, icon] of [["findPrev", "up"], ["findNext", "down"], ["findClose", "close"], ["customize", "customize"],
+                              ["paneClose", "close"]]) $(id).innerHTML = svg(ICON[icon]);
+    renderBar();
+    $("customize").addEventListener("click", openCustomize);
+    $("customDone").addEventListener("click", () => { $("custom").hidden = true; ta.focus(); });
+    $("customReset").addEventListener("click", () => { bar = DEFAULT_BAR.slice(); saveBar(); fillCustomize(); });
+    $("custom").addEventListener("keydown", (e) => { if (e.key === "Escape") { e.preventDefault(); $("custom").hidden = true; ta.focus(); } });
+    $("pinSearch").addEventListener("input", fillPins);
+    $("paneClose").addEventListener("click", () => togglePane(pane));
+    $("recent").addEventListener("click", async () => {
+      const m = $("recentMenu");
+      if (m.hidden) { await fillRecent(); m.hidden = false; } else m.hidden = true;
+    });
     $("open").addEventListener("click", () => $("fileInput").click());
     $("copy").addEventListener("click", copyAll);
     $("save").addEventListener("click", () => save());
@@ -640,21 +984,11 @@
       if (!m.hidden) { if (!$("fileName").value) $("fileName").value = defaultName(); fillSaveTypes(); }
     });
     $("fileName").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); $("saveMenu").hidden = true; save(); } });
-    $("plugins").addEventListener("click", () => ($("palette").hidden ? openPalette() : closePalette()));
-    $("format").addEventListener("click", format);
-    $("secrets").addEventListener("click", () => runTool(byId("secrets")));
-    $("lock").addEventListener("click", () => runTool(byId(ta.value.trimStart().startsWith(PREFIX) ? "decrypt" : "encrypt")));
-    $("find").addEventListener("click", () => ($("findBar").hidden ? openFind() : ($("findBar").hidden = true)));
     $("findNext").addEventListener("click", () => findStep(1));
     $("findPrev").addEventListener("click", () => findStep(-1));
     $("replaceOne").addEventListener("click", replaceOne);
     $("replaceAll").addEventListener("click", replaceAll);
     $("findClose").addEventListener("click", () => { $("findBar").hidden = true; ta.focus(); });
-    $("wrap").addEventListener("click", () => { wrap = !wrap; setPref("wrap", wrap); applyView(); });
-    $("smaller").addEventListener("click", () => zoom(-1));
-    $("bigger").addEventListener("click", () => zoom(1));
-    $("undo").addEventListener("click", () => { ta.focus(); document.execCommand("undo"); });
-    $("redo").addEventListener("click", () => { ta.focus(); document.execCommand("redo"); });
     $("lang").addEventListener("change", () => { recheck(); keep(); });
   }
   function format() {
@@ -664,15 +998,22 @@
   }
   document.addEventListener("keydown", (e) => {
     const k = e.key.toLowerCase(), mod = e.ctrlKey || e.metaKey;
-    if (!$("modal").hidden) return;
+    if (!$("modal").hidden || !$("custom").hidden) return;
+    const inText = document.activeElement === ta;
     if (mod && e.shiftKey && k === "p") { e.preventDefault(); $("palette").hidden ? openPalette() : closePalette(); }
+    else if (mod && e.shiftKey && k === "v") { e.preventDefault(); togglePane("preview"); }
+    else if (mod && k === "g") { e.preventDefault(); goToLineAsk(); }
+    else if (mod && !e.shiftKey && k === "d" && inText) { e.preventDefault(); lineCommand("dup"); }
+    else if (mod && e.shiftKey && k === "k" && inText) { e.preventDefault(); lineCommand("del"); }
+    else if (mod && k === "/" && inText) { e.preventDefault(); lineCommand("comment"); }
+    else if (e.altKey && !mod && (k === "arrowup" || k === "arrowdown") && inText) { e.preventDefault(); lineCommand(k === "arrowup" ? "up" : "down"); }
     else if (mod && e.shiftKey && k === "c") { e.preventDefault(); copyAll(); }
     else if (mod && k === "s") { e.preventDefault(); save(); }
     else if (mod && k === "f") { e.preventDefault(); openFind(false); }
     else if (mod && k === "h") { e.preventDefault(); openFind(true); }
     else if (mod && (k === "=" || k === "+")) { e.preventDefault(); zoom(1); }
     else if (mod && k === "-") { e.preventDefault(); zoom(-1); }
-    else if (e.altKey && !mod && k === "z") { e.preventDefault(); $("wrap").click(); }
+    else if (e.altKey && !mod && k === "z") { e.preventDefault(); BUILTIN.wrap[3](); }
     else if (e.altKey && e.shiftKey && k === "f") { e.preventDefault(); format(); }
     else if (k === "escape" && !$("palette").hidden) closePalette();
   });
@@ -704,7 +1045,7 @@
   }
 
   // the test harness looks inside through this; nothing else uses it
-  window.__ydmText = { get state() { return { kind, check, text: ta.value, saveType, fontSize, wrap, id: rec && rec.id }; },
+  window.__ydmText = { get state() { return { kind, check, text: ta.value, saveType, fontSize, wrap, light, pane, bar: bar.slice(), id: rec && rec.id }; },
                        run: (id) => runTool(byId(id)), recheck };
   start();
 })();

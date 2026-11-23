@@ -322,6 +322,201 @@ const TextKit = (() => {
     return String(Math.floor(d.getTime() / 1000));
   }
 
+  // ---- more tools ---------------------------------------------------------------------------------------------
+  const B32 = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  function base32(bytes) {
+    let bits = 0, value = 0, out = "";
+    for (const b of bytes) {
+      value = (value << 8) | b;
+      bits += 8;
+      while (bits >= 5) { out += B32[(value >>> (bits - 5)) & 31]; bits -= 5; }
+    }
+    if (bits > 0) out += B32[(value << (5 - bits)) & 31];
+    return out + "=".repeat((8 - (out.length % 8)) % 8);
+  }
+  function unbase32(text) {
+    const s = text.toUpperCase().replace(/[\s=-]+/g, "");
+    if (/[^A-Z2-7]/.test(s)) throw new Error("This isn't Base32: it uses only A–Z and 2–7.");
+    let bits = 0, value = 0;
+    const out = [];
+    for (const c of s) {
+      value = (value << 5) | B32.indexOf(c);
+      bits += 5;
+      if (bits >= 8) { out.push((value >>> (bits - 8)) & 255); bits -= 8; }
+    }
+    return new Uint8Array(out);
+  }
+  async function hmac(text, secret) {
+    const k = await crypto.subtle.importKey("raw", enc.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign"]);
+    return toHex(new Uint8Array(await crypto.subtle.sign("HMAC", k, enc.encode(text))));
+  }
+  const extract = (re, what) => (t) => {
+    const found = [...new Set(t.match(re) || [])];
+    if (!found.length) throw new Error(`Found no ${what}.`);
+    return { text: found.join("\n") + "\n", note: `Found ${found.length} ${what}` };
+  };
+  function numbers(base, prefix) {                  // every whole number in the text, in another base
+    return (t) => {
+      let n = 0;
+      // whole numbers only: 3.5 and 1,000.25 stay as they are
+      const out = t.replace(/(?<![\d.,])\b(0x[0-9a-f]+|0b[01]+|0o[0-7]+|\d+)\b(?![.,]\d)/gi, (m) => {
+        const v = BigInt(m.toLowerCase());               // BigInt reads 0x / 0b / 0o itself
+        n++;
+        return prefix + v.toString(base);
+      });
+      if (!n) throw new Error("Found no numbers to convert.");
+      return out;
+    };
+  }
+  function slug(t) {
+    return t.normalize("NFKD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+  }
+  function urlParts(t) {
+    let u;
+    try { u = new URL(t.trim()); } catch { throw new Error("Select a full address, like https://example.com/path?x=1"); }
+    const query = {};
+    for (const [k, v] of u.searchParams) query[k] = k in query ? [].concat(query[k], v) : v;
+    return JSON.stringify({ protocol: u.protocol.replace(":", ""), user: u.username || undefined, host: u.hostname,
+                            port: u.port || undefined, path: decodeURIComponent(u.pathname), query,
+                            fragment: u.hash ? decodeURIComponent(u.hash.slice(1)) : undefined }, null, 2) + "\n";
+  }
+  function queryToJson(t) {
+    const s = t.trim().replace(/^[^?]*\?/, "").replace(/#.*$/, "");
+    const out = {};
+    for (const [k, v] of new URLSearchParams(s)) out[k] = k in out ? [].concat(out[k], v) : v;
+    if (!Object.keys(out).length) throw new Error("Select a query string, like a=1&b=two");
+    return JSON.stringify(out, null, 2) + "\n";
+  }
+  function jsonToQuery(t) {
+    const v = jsonParse(t);
+    if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("JSON → query string needs an object.");
+    const p = new URLSearchParams();
+    for (const [k, x] of Object.entries(v)) for (const one of [].concat(x)) p.append(k, typeof one === "object" ? JSON.stringify(one) : String(one));
+    return p.toString();
+  }
+  function envToJson(t) {
+    const out = {};
+    for (const line of t.split(/\r?\n/)) {
+      const m = /^\s*(?:export\s+)?([A-Za-z_][\w.-]*)\s*=\s*(.*?)\s*$/.exec(line);
+      if (!m || line.trim().startsWith("#")) continue;
+      let v = m[2];
+      if (/^"(.*)"$/.test(v)) v = v.slice(1, -1).replace(/\\n/g, "\n").replace(/\\"/g, '"');
+      else if (/^'(.*)'$/.test(v)) v = v.slice(1, -1);
+      else v = v.replace(/\s+#.*$/, "");
+      out[m[1]] = v;
+    }
+    if (!Object.keys(out).length) throw new Error("Found no KEY=value lines.");
+    return JSON.stringify(out, null, 2) + "\n";
+  }
+  function jsonToEnv(t) {
+    const v = jsonParse(t);
+    if (!v || typeof v !== "object" || Array.isArray(v)) throw new Error("JSON → .env needs an object.");
+    return Object.entries(v).map(([k, x]) => {
+      const s = typeof x === "object" && x !== null ? JSON.stringify(x) : String(x ?? "");
+      return `${k.replace(/[^\w.-]/g, "_")}=${/[\s#"'$\\]/.test(s) || s === "" ? JSON.stringify(s) : s}`;
+    }).join("\n") + "\n";
+  }
+  function mdTable(rows) {
+    const cell = (x) => String(x ?? "").replace(/\|/g, "\\|").replace(/\r?\n/g, " ");
+    const w = rows[0].map((_c, i) => Math.max(3, ...rows.map((r) => cell(r[i]).length)));
+    const line = (r) => `| ${w.map((n, i) => cell(r[i]).padEnd(n)).join(" | ")} |`;
+    return [line(rows[0]), `| ${w.map((n) => "-".repeat(n)).join(" | ")} |`, ...rows.slice(1).map(line)].join("\n") + "\n";
+  }
+  function toMdTable(t) {
+    const s = t.trim();
+    if (s.startsWith("[") || s.startsWith("{")) {
+      let v = jsonParse(s);
+      if (!Array.isArray(v)) v = [v];
+      const keys = [...new Set(v.flatMap((o) => (o && typeof o === "object" ? Object.keys(o) : [])))];
+      if (!keys.length) throw new Error("Markdown table from JSON needs a list of objects.");
+      return mdTable([keys, ...v.map((o) => keys.map((k) => (typeof o[k] === "object" && o[k] !== null ? JSON.stringify(o[k]) : o[k])))]);
+    }
+    const rows = parseCsv(s);
+    if (rows.length < 1) throw new Error("Select CSV (or JSON) to turn into a table.");
+    const width = Math.max(...rows.map((r) => r.length));
+    return mdTable(rows.map((r) => Array.from({ length: width }, (_x, i) => r[i] ?? "")));
+  }
+  function tidyMdTable(t) {
+    const lines = t.trim().split(/\r?\n/).filter((l) => l.trim());
+    if (lines.length < 2 || !lines.every((l) => l.trim().startsWith("|"))) throw new Error("Select a Markdown table (lines starting with |).");
+    const rows = lines.filter((l, i) => !(i === 1 && /^\|?[\s:|-]+\|?$/.test(l.trim())))
+      .map((l) => l.trim().replace(/^\||\|$/g, "").split(/(?<!\\)\|/).map((c) => c.trim()));
+    return mdTable(rows.map((r) => r.map((c) => c.replace(/\\\|/g, "|"))));
+  }
+  const SQL_BREAK = ["SELECT", "FROM", "WHERE", "GROUP BY", "ORDER BY", "HAVING", "LIMIT", "OFFSET", "UNION ALL", "UNION",
+    "INSERT INTO", "VALUES", "UPDATE", "SET", "DELETE FROM", "LEFT OUTER JOIN", "RIGHT OUTER JOIN", "FULL OUTER JOIN",
+    "LEFT JOIN", "RIGHT JOIN", "INNER JOIN", "CROSS JOIN", "FULL JOIN", "JOIN", "ON", "RETURNING", "WITH"];
+  const SQL_WORDS = /\b(select|from|where|group by|order by|having|limit|offset|union all|union|insert into|values|update|set|delete from|left outer join|right outer join|full outer join|left join|right join|inner join|cross join|full join|join|on|returning|with|and|or|not|in|is|null|as|asc|desc|distinct|case|when|then|else|end|like|between|exists|count|sum|avg|min|max|create table|primary key|foreign key|references|default|into)\b/gi;
+  function sqlFormat(t) {
+    const parts = t.split(/('(?:''|[^'])*'|"(?:""|[^"])*"|--[^\n]*|\/\*[\s\S]*?\*\/)/);   // strings and comments stay as they are
+    let out = parts.map((p, i) => (i % 2 ? p : p.replace(/\s+/g, " ").replace(SQL_WORDS, (w) => w.toUpperCase()))).join("");
+    // every clause on its own line, in one pass, longest first (so LEFT JOIN isn't split at JOIN)
+    const clauses = [...SQL_BREAK].sort((a, b) => b.length - a.length).map((k) => k.replace(/ /g, "\\s+")).join("|");
+    out = out.replace(new RegExp(`\\s*\\b(${clauses})\\b`, "g"), (_m, k) => `\n${k.replace(/\s+/g, " ")}`);
+    out = out.replace(/\s+\b(AND|OR)\b/g, "\n  $1").replace(/,\s*(?=[^\n])/g, ",\n  ").replace(/^\s+/, "");
+    out = out.replace(/\n(FROM|WHERE|GROUP BY|ORDER BY|HAVING|LIMIT|SET|VALUES|ON|RETURNING)\b/g, "\n$1")
+      .replace(/(SELECT|GROUP BY|ORDER BY|SET|RETURNING)\s+/g, "$1\n  ").replace(/;\s*/g, ";\n\n");
+    return out.replace(/\n{3,}/g, "\n\n").trim() + "\n";
+  }
+  function tsTypes(t) {
+    const v = jsonParse(t);
+    const named = [];
+    const pascal = (k) => (k.replace(/(^|[^a-zA-Z0-9]+)([a-zA-Z0-9])/g, (_m, _a, c) => c.toUpperCase()) || "Item");
+    function type(x, name) {
+      if (x === null) return "null";
+      if (Array.isArray(x)) {
+        if (!x.length) return "unknown[]";
+        const ts = [...new Set(x.map((y) => type(y, name.replace(/s$/, "") || "Item")))];
+        return ts.length === 1 ? `${ts[0]}[]` : `(${ts.join(" | ")})[]`;
+      }
+      if (typeof x === "object") {
+        const n = pascal(name);
+        if (!named.some(([k]) => k === n)) {
+          const body = Object.entries(x).map(([k, y]) => `  ${/^[A-Za-z_$][\w$]*$/.test(k) ? k : JSON.stringify(k)}: ${type(y, k)};`);
+          named.push([n, `export interface ${n} {\n${body.join("\n")}\n}`]);
+        }
+        return n;
+      }
+      return typeof x;
+    }
+    const root = type(v, "Root");
+    const out = named.reverse().map(([, s]) => s);
+    if (!/^[A-Z]/.test(root) || Array.isArray(v)) out.push(`export type Root = ${root};`);
+    return out.join("\n\n") + "\n";
+  }
+  const LOREM = "Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore " +
+    "magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat.";
+
+  // ---- compare two texts, line by line ------------------------------------------------------------------------
+  // [op, line, old number, new number] with op " " (same), "-" (only in the old), "+" (only in the new). The
+  // common start and end are matched first, the middle by longest common subsequence (up to 3000 × 3000 lines).
+  function lineDiff(a, b) {
+    const A = a.replace(/\r\n?/g, "\n").split("\n"), B = b.replace(/\r\n?/g, "\n").split("\n");
+    let s = 0;
+    while (s < A.length && s < B.length && A[s] === B[s]) s++;
+    let e = 0;
+    while (e < A.length - s && e < B.length - s && A[A.length - 1 - e] === B[B.length - 1 - e]) e++;
+    const a2 = A.slice(s, A.length - e), b2 = B.slice(s, B.length - e);
+    if (a2.length > 3000 || b2.length > 3000) throw new Error("The texts differ in over 3000 lines: too much to compare line by line.");
+    const n = a2.length, m = b2.length, W = m + 1;
+    const L = new Uint16Array((n + 1) * W);
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        L[i * W + j] = a2[i] === b2[j] ? L[(i + 1) * W + j + 1] + 1 : Math.max(L[(i + 1) * W + j], L[i * W + j + 1]);
+      }
+    }
+    const out = [];
+    for (let k = 0; k < s; k++) out.push([" ", A[k], k + 1, k + 1]);
+    let i = 0, j = 0;
+    while (i < n || j < m) {
+      if (i < n && j < m && a2[i] === b2[j]) { out.push([" ", a2[i], s + i + 1, s + j + 1]); i++; j++; }
+      else if (j < m && (i === n || L[i * W + j + 1] >= L[(i + 1) * W + j])) { out.push(["+", b2[j], null, s + j + 1]); j++; }
+      else { out.push(["-", a2[i], s + i + 1, null]); i++; }
+    }
+    for (let k = 0; k < e; k++) out.push([" ", A[A.length - e + k], A.length - e + k + 1, B.length - e + k + 1]);
+    return out;
+  }
+
   // ---- the menu ---------------------------------------------------------------------------------------------
   // [group, id, label, fn, { insert: true } — puts its result at the cursor instead of replacing the text]
   const TOOLS = [
@@ -345,6 +540,18 @@ const TextKit = (() => {
       return v;
     }],
     ["Convert", "time", "Unix time ⇄ date", timeConvert],
+    ["Convert", "url-parts", "URL → its parts (JSON)", urlParts],
+    ["Convert", "query-json", "Query string → JSON", queryToJson],
+    ["Convert", "json-query", "JSON → query string", jsonToQuery],
+    ["Convert", "env-json", ".env → JSON", envToJson],
+    ["Convert", "json-env", "JSON → .env", jsonToEnv],
+    ["Convert", "md-table", "CSV / JSON → Markdown table", toMdTable],
+    ["Convert", "ts-types", "JSON → TypeScript types", tsTypes],
+    ["Convert", "to-hex", "Numbers → hex", numbers(16, "0x")],
+    ["Convert", "to-dec", "Numbers → decimal", numbers(10, "")],
+    ["Convert", "to-bin", "Numbers → binary", numbers(2, "0b")],
+    ["Format", "md-tidy", "Markdown table: line up", tidyMdTable],
+    ["Format", "sql", "SQL: format", sqlFormat],
     ["Encode", "b64-enc", "Base64 encode", (t) => bytesToB64(enc.encode(t))],
     ["Encode", "b64-dec", "Base64 decode", (t) => dec(b64ToBytes(t))],
     ["Encode", "b64url-enc", "Base64URL encode", (t) => bytesToB64(enc.encode(t)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "")],
@@ -369,10 +576,15 @@ const TextKit = (() => {
       catch (e) { throw new Error(/binary|Base64/.test(e.message) ? e.message : "This isn't gzip data in Base64."); }
     }],
     ["Encode", "jwt", "JWT decode", jwt],
+    ["Encode", "b32-enc", "Base32 encode", (t) => base32(enc.encode(t))],
+    ["Encode", "b32-dec", "Base32 decode", (t) => dec(unbase32(t))],
+    ["Encode", "rot13", "ROT13", (t) => t.replace(/[a-z]/gi, (c) => String.fromCharCode((c <= "Z" ? 65 : 97) + ((c.charCodeAt(0) - (c <= "Z" ? 65 : 97) + 13) % 26)))],
+    ["Encode", "regex-esc", "Escape for a regular expression", (t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")],
     ["Hash", "md5", "MD5", (t) => md5(enc.encode(t))],
     ["Hash", "sha1", "SHA-1", sha("SHA-1")],
     ["Hash", "sha256", "SHA-256", sha("SHA-256")],
     ["Hash", "sha512", "SHA-512", sha("SHA-512")],
+    ["Hash", "hmac", "HMAC-SHA256 (with a key)", null, { secret: true }],
     ["Privacy", "secrets", "Hide passwords, keys and tokens", hideSecrets],
     ["Privacy", "mask", "Mask (••••)", (t) => t.replace(/[^\s]/g, "•")],
     ["Privacy", "encrypt", "Encrypt with a password (AES-256)", null, { password: "new" }],
@@ -401,10 +613,22 @@ const TextKit = (() => {
     ["Lines", "split", "Split commas into lines", (t) => t.split(/\s*[,;]\s*/).filter(Boolean).join("\n")],
     ["Lines", "number", "Number the lines", lines((ls) => ls.map((l, i) => `${String(i + 1).padStart(String(ls.length).length, " ")}  ${l}`))],
     ["Lines", "tabs", "Tabs → spaces", (t) => t.replace(/\t/g, "    ")],
+    ["Lines", "trailing", "Remove spaces at line ends", (t) => t.replace(/[ \t]+$/gm, "")],
+    ["Lines", "squash", "Collapse repeated spaces", (t) => t.replace(/([^\s]) {2,}/g, "$1 ")],
+    ["Lines", "unwrap", "Remove line breaks", (t) => t.replace(/\s*\r?\n\s*/g, " ").trim()],
+    ["Lines", "lf", "Line endings: LF (Linux, Mac)", (t) => t.replace(/\r\n?/g, "\n")],
+    ["Lines", "crlf", "Line endings: CRLF (Windows)", (t) => t.replace(/\r?\n/g, "\r\n")],
+    ["Text", "reverse-text", "Reverse the text", (t) => Array.from(t).reverse().join("")],
+    ["Text", "slug", "Slug (url-friendly-name)", perLine(slug)],
+    ["Extract", "emails", "Email addresses", extract(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g, "email addresses")],
+    ["Extract", "urls", "Links", extract(/\bhttps?:\/\/[^\s<>"'()]+[^\s<>"'().,;:!?]/g, "links")],
+    ["Extract", "ips", "IP addresses", extract(/\b(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|1?\d?\d)\b/g, "IP addresses")],
+    ["Extract", "nums", "Numbers", extract(/-?\b\d+(?:[.,]\d+)*\b/g, "numbers")],
     ["Insert", "uuid", "UUID", () => uuid(), { insert: true }],
     ["Insert", "now", "Date and time (ISO)", () => new Date().toISOString(), { insert: true }],
     ["Insert", "unix", "Unix time", () => String(Math.floor(Date.now() / 1000)), { insert: true }],
     ["Insert", "password", "Strong password (20 characters)", () => password(20), { insert: true }],
+    ["Insert", "lorem", "Placeholder text (lorem ipsum)", () => LOREM, { insert: true }],
   ];
 
   // ---- validation -------------------------------------------------------------------------------------------
@@ -440,14 +664,23 @@ const TextKit = (() => {
     const t = text.trimStart();
     if (!t) return "text";
     if (t[0] === "{" || t[0] === "[") return "json";
+    if (/^<!doctype html|^<html[\s>]/i.test(t)) return "html";
     if (t[0] === "<") return "xml";
     const ls = text.split("\n").filter((l) => l.trim() && !l.trim().startsWith("#")).slice(0, 30);
     const yamlish = ls.filter((l) => /^\s*(- )?[\w"'.\/-][^:]*:(\s|$)/.test(l) || /^\s*- /.test(l) || /^---/.test(l)).length;
-    return ls.length && yamlish / ls.length >= 0.6 ? "yaml" : "text";
+    // Markdown's own signs (a list alone could be YAML too): headings, code fences, quotes, links, bold, tables
+    const all = text.split("\n");
+    const strong = all.filter((l) => /^#{1,6}\s+\S|^```|^>\s|\[[^\]]+\]\([^)]+\)|\*\*[^*]+\*\*|^\|.*\|\s*$/.test(l)).length;
+    const lists = all.filter((l) => /^\s*([-*+]|\d+\.)\s/.test(l)).length;
+    if (ls.length && yamlish / ls.length >= 0.6) {
+      if (!strong) return "yaml";
+      try { YAML.parseAll(text); return "yaml"; } catch { return "markdown"; }   // reads as YAML: it's YAML
+    }
+    return strong >= 2 || (strong >= 1 && lists >= 1) ? "markdown" : "text";
   }
   function validate(text, lang) {
     const kind = lang === "auto" ? detect(text) : lang;
-    if (!text.trim() || kind === "text") return { kind, ok: true, message: "" };
+    if (!text.trim() || !["json", "yaml", "xml"].includes(kind)) return { kind, ok: true, message: "" };
     try {
       if (kind === "json") JSON.parse(text);
       else if (kind === "yaml") YAML.parseAll(text);
@@ -461,7 +694,7 @@ const TextKit = (() => {
     }
   }
 
-  return { TOOLS, validate, detect, encrypt, decrypt, hideSecrets, md5, b64ToBytes, bytesToB64, parseCsv, password, uuid };
+  return { TOOLS, validate, detect, encrypt, decrypt, hmac, lineDiff, hideSecrets, md5, b64ToBytes, bytesToB64, parseCsv, password, uuid };
 })();
 
 if (typeof module !== "undefined") module.exports = TextKit;

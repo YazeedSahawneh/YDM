@@ -346,7 +346,26 @@
     menu.append(footer());
   }
 
-  function renderOptions(info) {
+  // The streams this page played (seen by the background): when a site can't be read, they are the way to
+  // the whole video, not its 2 MB pieces.
+  function streamRows(here) {
+    const out = [];
+    if (!here || !here.list || !here.list.length) return out;
+    out.push(el("div", "head", "Streams this page played"));
+    for (const m of here.list.slice(0, 4)) {
+      const label = m.stream === "master" ? "Stream · every quality" : m.stream === "dash" ? "DASH stream · whole video"
+        : m.stream === "quality" ? "Stream · one quality" : m.kind === "video" ? "Stream" : m.whole ? "Whole video file" : "Video file";
+      const b = el("button", "opt");
+      b.setAttribute("role", "menuitem");
+      b.title = m.url;
+      b.append(el("span", "", label), el("span", "size", size(m.size)));
+      b.addEventListener("click", () => send(b, { stream: m }));
+      out.push(b);
+    }
+    return out;
+  }
+
+  function renderOptions(info, here) {
     menu.textContent = "";
     menu.append(el("div", "head", info.title || "Choose quality"));
     let audioStarted = false;
@@ -364,6 +383,8 @@
     more.append(el("span", "", "More options in YDM…"));
     more.addEventListener("click", () => send(more, {}));
     menu.append(more);
+    const streams = streamRows(here);
+    if (streams.length) menu.append(el("div", "sep"), ...streams);
     menu.append(footer());
   }
 
@@ -390,7 +411,7 @@
     menu.append(footer());
   }
 
-  function renderError(message) {
+  function renderError(message, here) {
     menu.textContent = "";
     menu.append(el("div", "note err", message));
     const src = current && (current.currentSrc || current.src);
@@ -399,6 +420,12 @@
       b.addEventListener("click", () => send(b, { src }));
       menu.append(b);
     }
+    const streams = streamRows(here);
+    if (streams.length) menu.append(...streams);
+    else if (here && here.segments) {
+      menu.append(el("div", "note", `This page streams the video in ${here.segments} small pieces without a playlist YDM ` +
+                                    "can use yet. Reload the page and play the video for a moment, then try again."));
+    }
     menu.append(footer());
   }
 
@@ -406,9 +433,10 @@
     row.classList.add("sent");
     const out = row.querySelector(".size") || row.firstChild;
     out.textContent = "Sending…";
-    const msg = choice.photo || choice.post
-      ? { type: "grab-photo", src: choice.photo || "", post: choice.post || "", page: location.href }
-      : { type: "grab-video", url: pageUrl, ...choice };
+    const msg = choice.stream ? { type: "send-media", url: choice.stream.url, kind: choice.stream.kind, page: location.href }
+      : choice.photo || choice.post
+        ? { type: "grab-photo", src: choice.photo || "", post: choice.post || "", page: location.href }
+        : { type: "grab-video", url: pageUrl, ...choice };
     const ok = await chrome.runtime.sendMessage(msg).catch(() => false);
     out.textContent = ok ? "Started" : "YDM isn't running";
     if (ok) setTimeout(hide, 700);
@@ -422,10 +450,13 @@
       clearTimeout(hideTimer);
       if (isPhoto(current)) { renderPhoto(); return; }
       renderLoading();
-      const res = await chrome.runtime.sendMessage({ type: "video-info", url: pageUrl }).catch(() => null);
+      const [res, here] = await Promise.all([
+        chrome.runtime.sendMessage({ type: "video-info", url: pageUrl }).catch(() => null),
+        chrome.runtime.sendMessage({ type: "media-here" }).catch(() => null)]);
       if (!menu.classList.contains("show")) return;
-      if (res && res.options) renderOptions(res);
-      else renderError(res && res.offline ? "Start YDM on your PC first." : `Couldn't read this video${res && res.error ? `: ${res.error}` : "."}`);
+      if (res && res.options) renderOptions(res, here);
+      else renderError(res && res.offline ? "Start YDM on your PC first."
+        : `Couldn't read this video${res && res.error ? `: ${res.error}` : "."}`, here);
     } else {
       button.classList.remove("open");
     }
