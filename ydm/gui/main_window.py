@@ -11,7 +11,7 @@ from PySide6.QtCore import QItemSelectionModel, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QActionGroup, QGuiApplication, QKeySequence
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
                                QLineEdit, QMainWindow, QMenu, QMenuBar, QMessageBox, QPushButton, QSizePolicy,
-                               QSplitter, QSystemTrayIcon, QTableView, QToolBar, QTreeWidget, QTreeWidgetItem,
+                               QSplitter, QSystemTrayIcon, QToolBar, QTreeWidget, QTreeWidgetItem,
                                QVBoxLayout, QWidget)
 
 from .. import tools, updater
@@ -24,8 +24,9 @@ from .dialogs import (BatchDialog, CountdownDialog, LoginDialog, MirrorsDialog, 
 from .download_window import DownloadWindow
 from .models import (COL_ADDED, COL_ETA, COL_NAME, COL_PROGRESS, COL_SIZE, COL_SPEED, COL_STATUS, FILTERS,
                      DownloadsModel, MeterDelegate, NameDelegate)
-from .widgets import Banner, DetailsPane, SpeedMeter
+from .widgets import Banner, DetailsPane, DownloadTable, SpeedMeter
 
+BROWSER_REPEAT = 10.0       # s: the same link from the browser again this soon is the same download
 SIDEBAR_ICONS = {"All downloads": "all", "Downloading": "speed", "Unfinished": "unfinished",
                  "Finished": "finished", "Queued": "queued"}
 
@@ -68,6 +69,7 @@ class MainWindow(frame.Frameless, QMainWindow):
             self.set_compact(True)
 
         self.browser_request.connect(self.handle_browser_request)
+        self._from_browser: dict[tuple[str, str], tuple[float, str | None]] = {}   # (kind, url) -> (when, item id)
         self.item_event.connect(self._on_item_event)
         self.bg_progress.connect(self._on_bg_progress)
         self.bg_done.connect(self._on_bg_done)
@@ -249,7 +251,7 @@ class MainWindow(frame.Frameless, QMainWindow):
 
         # list
         self.model = DownloadsModel(self.manager)
-        self.table = QTableView()
+        self.table = DownloadTable()
         self.table.setModel(self.model)
         self.table.setItemDelegateForColumn(COL_PROGRESS, MeterDelegate(self.table))
         self.table.setItemDelegateForColumn(COL_NAME, NameDelegate(self.table))
@@ -421,6 +423,9 @@ class MainWindow(frame.Frameless, QMainWindow):
 
     # ------------------------------------------------------------- refresh
     def refresh(self):
+        if self.table.selecting:                   # a box drag is on: rows moving under it would confuse it
+            self.table.viewport().update()
+            return
         selected = self._selected_ids()
         if self.model.refresh():
             sm = self.table.selectionModel()
@@ -605,6 +610,8 @@ class MainWindow(frame.Frameless, QMainWindow):
                                      "Cookie": payload.get("cookies") or ""}.items() if v}
         if kind == "file" and self._renew_from_browser(payload, headers):
             return
+        if kind == "file" and self._just_had(payload.get("url", ""), kind):
+            return
         quick = (kind == "file" and not self.settings.show_add_dialog) or \
             bool(payload.get("quick"))          # quality already picked on the page / "Save photo"
         if not quick:
@@ -613,11 +620,33 @@ class MainWindow(frame.Frameless, QMainWindow):
         item = self.manager.add(payload["url"], kind=kind, filename=payload.get("filename") or "",
                                 headers=headers, video_format=payload.get("video_format") or "",
                                 convert=payload.get("convert") or "", title=payload.get("title") or "")
+        self._note_from_browser(payload["url"], kind, item.id)
         if self.settings.progress_window:
             self.open_download_window(item_id=item.id)
         elif self.tray.isVisible():
             self.tray.showMessage(APP_NAME, f"Downloading {item.title or item.filename or 'file'}",
                                   QSystemTrayIcon.Information, 2500)
+
+    def _just_had(self, url: str, kind: str) -> bool:
+        """The same link from the browser twice within a few seconds is one download (a site that opens the file
+        and also downloads it, a double click): show the first one's window instead of starting a second copy."""
+        now = time.monotonic()
+        recent = self._from_browser
+        for k in [k for k, (t, _id) in recent.items() if now - t > BROWSER_REPEAT]:
+            del recent[k]
+        key = (kind, url)
+        if key in recent:
+            item_id = recent[key][1]
+            if item_id and self.manager.get(item_id) and self.settings.progress_window:
+                self.open_download_window(item_id=item_id)
+            return True
+        recent[key] = (now, None)
+        return False
+
+    def _note_from_browser(self, url: str, kind: str, item_id: str):
+        recent = self._from_browser
+        if (kind, url) in recent:
+            recent[(kind, url)] = (recent[(kind, url)][0], item_id)
 
     def _renew_from_browser(self, payload: dict, headers: dict) -> bool:
         url = payload.get("url", "")

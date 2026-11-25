@@ -1,14 +1,14 @@
-"""Custom widgets: the total-speed meter, the details pane, and the notice banner."""
+"""Custom widgets: the download list, the total-speed meter, the details pane, and the notice banner."""
 from __future__ import annotations
 
 import math
 import os
 import time
 
-from PySide6.QtCore import QRectF, QSize, Qt
+from PySide6.QtCore import QItemSelection, QItemSelectionModel, QPoint, QRect, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QFontMetrics, QPainter
-from PySide6.QtWidgets import (QAbstractItemView, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel,
-                               QProgressBar, QPushButton, QTableWidget, QTableWidgetItem,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
+                               QLabel, QProgressBar, QPushButton, QTableView, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
 from ..engine import DownloadItem, Status
@@ -17,6 +17,129 @@ from . import icons, theme
 from .hudbar import HudBar
 
 LOW, HIGH = 64 * 1024, 256 * 1024 * 1024          # meter range, log scale
+
+
+class _Band(QWidget):
+    """The selection box drawn while dragging: accent outline over a faint accent wash (colours read at paint time)."""
+
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        fill = QColor(theme.ACCENT)
+        fill.setAlpha(38)
+        p.fillRect(self.rect(), fill)
+        line = QColor(theme.ACCENT)
+        line.setAlpha(200)
+        p.setPen(line)
+        p.drawRect(self.rect().adjusted(0, 0, -1, -1))
+
+
+class DownloadTable(QTableView):
+    """The download list. Drag a box to select several downloads, like File Explorer: from a row or from the
+    empty space under the list; Ctrl+drag adds to what's selected, Esc puts the selection back. Near the top or
+    bottom edge the list scrolls while you drag."""
+
+    EDGE = 28                                      # px from the top/bottom edge where dragging scrolls
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._band = _Band(self.viewport())
+        self._origin: QPoint | None = None         # where the press was, in list coordinates (scroll included)
+        self._pos = QPoint()                       # the mouse now, in viewport coordinates
+        self._before = QItemSelection()            # what the box adds to (Ctrl+drag: the selection before it)
+        self._undo = QItemSelection()              # the selection before the press (Esc puts it back)
+        self._adding = False
+        self.selecting = False                     # a box drag is on (MainWindow holds its refresh meanwhile)
+        self._scroll = QTimer(self)
+        self._scroll.setInterval(30)
+        self._scroll.timeout.connect(self._auto_scroll)
+
+    def _content(self, p: QPoint) -> QPoint:
+        return QPoint(p.x() + self.horizontalOffset(), p.y() + self.verticalOffset())
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and not (e.modifiers() & Qt.ShiftModifier):
+            self._origin = self._content(e.position().toPoint())
+            self._adding = bool(e.modifiers() & Qt.ControlModifier)
+            self._before = QItemSelection(self.selectionModel().selection())
+            self._undo = QItemSelection(self._before)
+        else:
+            self._origin = None
+        super().mousePressEvent(e)
+
+    def mouseMoveEvent(self, e):
+        pos = e.position().toPoint()
+        if self._origin is not None and e.buttons() & Qt.LeftButton:
+            start = self._origin - QPoint(self.horizontalOffset(), self.verticalOffset())
+            if not self.selecting and (pos - start).manhattanLength() >= QApplication.startDragDistance():
+                self.selecting = True
+                if not self._adding:
+                    self._before = QItemSelection()
+            if self.selecting:
+                self._pos = pos
+                self._update_box()
+                edge = pos.y() < self.EDGE or pos.y() > self.viewport().height() - self.EDGE
+                if edge and not self._scroll.isActive():
+                    self._scroll.start()
+                elif not edge:
+                    self._scroll.stop()
+                return
+        super().mouseMoveEvent(e)
+
+    def mouseReleaseEvent(self, e):
+        if self.selecting and e.button() == Qt.LeftButton:
+            self._finish()
+            return
+        self._origin = None
+        super().mouseReleaseEvent(e)
+
+    def keyPressEvent(self, e):
+        if self.selecting and e.key() == Qt.Key_Escape:
+            self.selectionModel().select(self._undo, QItemSelectionModel.ClearAndSelect)
+            self._finish()
+            return
+        super().keyPressEvent(e)
+
+    def _finish(self):
+        self._scroll.stop()
+        self._band.hide()
+        self.selecting = False
+        self._origin = None
+        self.setState(QAbstractItemView.NoState)
+
+    def _auto_scroll(self):
+        bar = self.verticalScrollBar()
+        y, h = self._pos.y(), self.viewport().height()
+        step = -max(4, (self.EDGE - y) // 2) if y < self.EDGE else max(4, (y - (h - self.EDGE)) // 2)
+        before = bar.value()
+        bar.setValue(before + step)
+        if bar.value() != before:
+            self._update_box()
+
+    def _update_box(self):
+        off = QPoint(self.horizontalOffset(), self.verticalOffset())
+        box = QRect(self._origin, self._content(self._pos)).normalized()
+        shown = box.translated(-off).intersected(self.viewport().rect().adjusted(0, 0, -1, -1))
+        self._band.setGeometry(shown)
+        self._band.setVisible(not shown.isEmpty())
+        self._band.raise_()
+        # every row the box touches (rows run the full width, so only the height counts)
+        model, head = self.model(), self.verticalHeader()
+        sel = QItemSelection(self._before)
+        if model is not None and model.rowCount():
+            top, bottom = max(0, box.top()), min(head.length() - 1, box.bottom())
+            if top <= bottom:
+                first, last = head.logicalIndexAt(top - off.y()), head.logicalIndexAt(bottom - off.y())
+                if first >= 0 and last >= 0:
+                    rows = QItemSelection(model.index(first, 0), model.index(last, model.columnCount() - 1))
+                    sel.merge(rows, QItemSelectionModel.Select)
+                    near = last if self._content(self._pos).y() >= self._origin.y() else first
+                    self.selectionModel().setCurrentIndex(model.index(near, 0), QItemSelectionModel.NoUpdate)
+        self.selectionModel().select(sel, QItemSelectionModel.ClearAndSelect | QItemSelectionModel.Rows)
 
 
 def _level(bps: float) -> float:

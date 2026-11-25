@@ -258,5 +258,41 @@ li.status, li.error = Status.ERROR, f"{LOGIN_NEEDED}: enter a user name and pass
 pump(0.4); assert lw.form.isRowVisible(4), "login row didn't appear"; lw.grab().save(f"{out}/login.png"); lw.close()
 assert find_urls("ftp://files.example/a.iso") == ["ftp://files.example/a.iso"]
 print("theme / connections / login OK")
+
+# 1.9.1: the same link from the browser twice in a row is one download (Pixabay sent it twice)
+s.progress_window = False
+n0 = len(m.items())
+dup = {"url": base + "/slow/twice.mp3", "kind": "file", "filename": "twice.mp3", "quick": True}
+w.handle_browser_request(dict(dup)); w.handle_browser_request(dict(dup)); pump(0.2)
+assert len(m.items()) == n0 + 1, [i.url for i in m.items()][-3:]
+w._from_browser[("file", dup["url"])] = (time.monotonic() - 11, None)          # later on: a new download again
+w.handle_browser_request(dict(dup)); pump(0.2)
+assert len(m.items()) == n0 + 2
+s.progress_window = True
+for it in [i for i in m.items() if "twice.mp3" in i.url]:
+    m.remove(it.id)
+print("same link twice = one download OK")
+
+# 1.9.1: drag a box over the list to select several downloads
+from PySide6.QtTest import QTest
+from PySide6.QtCore import QPoint, Qt as _Qt
+w.show_normal(); w.resize(1300, 1150); pump(0.4)
+w.sidebar.setCurrentItem(w.sidebar.topLevelItem(0)); pump(0.3)
+for i in range(6):
+    m.add(f"{base}/box{i}.bin", start=False)
+w.refresh(); pump(0.3)
+t, vp = w.table, w.table.viewport()
+t.scrollToTop(); t.clearSelection(); pump(0.1)
+picked = lambda: sorted({i.row() for i in t.selectionModel().selectedRows()})
+a, b = t.visualRect(w.model.index(0, 1)).center(), t.visualRect(w.model.index(3, 1)).center()
+QTest.mousePress(vp, _Qt.LeftButton, _Qt.NoModifier, a); pump(0.05)
+QTest.mouseMove(vp, QPoint(a.x() + 30, (a.y() + b.y()) // 2)); pump(0.05)
+QTest.mouseMove(vp, QPoint(a.x() + 60, b.y())); pump(0.05)
+assert t.selecting and t._band.isVisible()
+held = list(w.model.ids); w.refresh(); assert w.model.ids == held          # the list holds still while dragging
+w.grab().save(f"{out}/box-select.png")
+QTest.mouseRelease(vp, _Qt.LeftButton, _Qt.NoModifier, QPoint(a.x() + 60, b.y())); pump(0.1)
+assert picked() == [0, 1, 2, 3] and not t._band.isVisible() and len(w._selected_ids()) == 4, picked()
+print("box selection OK")
 server.stop(); m.shutdown()
 print("GUI OK")

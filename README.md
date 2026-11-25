@@ -18,6 +18,7 @@ A personal IDM-style download manager for Windows, written from scratch in Pytho
 - **Proxy**: HTTP or SOCKS5 (with a user name and password), or the Windows proxy settings (Options → Proxy & logins)
 - **Logins**: HTTP Basic, Digest and NTLM/Negotiate, and FTP. Type one in the download window, put it in the address (`https://user:pass@host/…`), or save it per site; passwords are encrypted with Windows DPAPI
 - **Change the connection count while a download runs**: new connections join at once, extra ones finish their piece and leave
+- **Select several downloads by dragging a box** over the list (from a row or the empty space under it), like File Explorer: Ctrl+drag adds to the selection, Esc puts it back, and the list scrolls when you drag past its edge. Then Delete, Resume, Stop or right-click works on all of them
 - **Pause / resume** that survives restarts, crashes (a crashed download picks up by itself when YDM starts) and app updates; network errors retry by themselves
 - **Renew expired downloads**: when a link stops working, right-click → *Renew download address*, then click the link in the browser again. YDM catches the fresh link, checks it is the same file (same size), and continues where it stopped
 - **Download window** per download: starts before you confirm; Save as (name and folder, any time, even after it finished), Remember this folder, Cancel, Download later, Open with…, the address with a copy button, and the live connection count

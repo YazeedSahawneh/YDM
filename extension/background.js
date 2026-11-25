@@ -76,8 +76,18 @@ function extOf(name) {
   return m ? m[1].toLowerCase() : "";
 }
 
+// One link, one download. A link can reach both catchers: a site's download button opens the file's address in
+// the tab, and the browser turns that into a download (Pixabay does this). Each side marks what it took; the other
+// leaves it alone for a minute.
+const ONE_MINUTE = 60000;
+const seenAsDownload = new Map();                  // url -> when the browser started downloading it
+const sentFromTab = new Map();                     // url -> when the tab catcher handed it to YDM
+const recent = (map, urls) => urls.some((u) => u && Date.now() - (map.get(u) || 0) < ONE_MINUTE);
+
 // ---- intercept normal browser downloads ------------------------------------
 chrome.downloads.onCreated.addListener(async (item) => {
+  const urls = [item.url, item.finalUrl].filter(Boolean);
+  for (const u of urls) seenAsDownload.set(u, Date.now());          // before any await: the tab catcher checks it
   const s = await getSettings();
   const url = item.finalUrl || item.url;
   if (!s.enabled || !/^https?:/i.test(url) || item.state !== "in_progress") return;
@@ -102,6 +112,7 @@ chrome.downloads.onCreated.addListener(async (item) => {
     await chrome.downloads.cancel(item.id);
     await chrome.downloads.erase({ id: item.id });
   } catch { /* already finished */ }
+  if (recent(sentFromTab, urls)) return;           // the tab catcher already gave it to YDM
 
   const ok = await sendToApp({
     url, kind: "file",
@@ -196,10 +207,11 @@ chrome.webRequest.onResponseStarted.addListener(async (d) => {
 // They never become downloads, so the download catcher never sees them. Remember what each tab is showing
 // (the popup offers "Download with YDM"), and hand videos and music (and PDFs, if wanted) to YDM by itself.
 const PLAYABLE = /^(video|audio)\//i;
-const recentlyCaught = new Map();
 chrome.webRequest.onResponseStarted.addListener(async (d) => {
   if (d.tabId < 0 || !/^https?:/i.test(d.url) || d.statusCode >= 400) return;
   const header = (name) => (d.responseHeaders || []).find((h) => h.name.toLowerCase() === name)?.value || "";
+  // "attachment": the browser downloads it (the download catcher's job) and the tab keeps its page
+  if (/^\s*attachment/i.test(header("content-disposition"))) return;
   const type = header("content-type").split(";")[0].trim().toLowerCase();
   const doc = `doc:${d.tabId}`;
   if (!type || /^text\/html|^application\/xhtml/.test(type)) { chrome.storage.session.remove(doc); return; }
@@ -209,11 +221,13 @@ chrome.webRequest.onResponseStarted.addListener(async (d) => {
   await chrome.storage.session.set({ [doc]: { url: d.url, type, size, name } });
   const s = await getSettings();
   const wanted = s.enabled && ((s.catchPlayable && PLAYABLE.test(type)) || (s.catchPdf && type === "application/pdf"));
-  const last = recentlyCaught.get(d.url) || 0;
-  if (!wanted || Date.now() - last < 60000 || !(await ping(s.port))) return;          // a reload isn't a new download
-  recentlyCaught.set(d.url, Date.now());
+  // a reload isn't a new download, and a file the browser is downloading is the download catcher's
+  if (!wanted || recent(sentFromTab, [d.url]) || !(await ping(s.port))) return;
+  await new Promise((r) => setTimeout(r, 250));    // the browser says "download" right after the response starts
+  if (recent(seenAsDownload, [d.url]) || recent(sentFromTab, [d.url])) return;
+  sentFromTab.set(d.url, Date.now());
   const ok = await sendToApp({ url: d.url, kind: "file", filename: name, referrer: d.initiator || "", fileSize: size });
-  if (!ok) recentlyCaught.delete(d.url);
+  if (!ok) sentFromTab.delete(d.url);
 }, { urls: ["<all_urls>"], types: ["main_frame"] }, ["responseHeaders"]);
 
 chrome.tabs.onUpdated.addListener((tabId, info) => {
